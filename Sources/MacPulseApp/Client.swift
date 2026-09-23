@@ -12,6 +12,10 @@ final class Client: ObservableObject {
     @Published private(set) var host: HostInfo?
     @Published private(set) var samples: [Sample] = []
     @Published private(set) var connected = false
+    /// Nil until the daemon reports control state. Distinguishes "no fan
+    /// control on this machine" from "not connected yet", which the UI must
+    /// not conflate.
+    @Published private(set) var control: ControlState?
     /// Currently firing threshold alerts, critical first.
     @Published private(set) var alerts: [Alert] = []
 
@@ -27,7 +31,13 @@ final class Client: ObservableObject {
     /// Rolling window kept in the UI. The daemon holds 6 h; the menu only ever
     /// draws minutes, and retaining all of it would cost more than the app.
     private let windowSize = 300
-    private var fd: Int32 = -1
+    /// Held so commands can be written back on the same connection the
+    /// telemetry arrives on -- the daemon authorises per-peer, so a second
+    /// connection would have to be authorised again for no benefit.
+    ///
+    /// Boxed outside actor isolation on purpose: the reader runs on its own
+    /// thread and must set this, while `send` is called from the main actor.
+    private let sock = FDBox()
 
     var latest: Sample? { samples.last }
 
@@ -59,10 +69,15 @@ final class Client: ObservableObject {
         }
         guard ok == 0 else { close(s); return }
 
+        sock.value = s
         Task { @MainActor in self.connected = true }
         defer {
+            sock.value = -1
             close(s)
-            Task { @MainActor in self.connected = false }
+            Task { @MainActor in
+                self.connected = false
+                self.control = nil
+            }
         }
 
         let decoder = JSONDecoder()
@@ -94,12 +109,31 @@ final class Client: ObservableObject {
         }
     }
 
+    /// Fire-and-forget: the daemon answers with a `.control` frame on the
+    /// same socket, so there is nothing to await here.
+    func send(_ command: Command) {
+        guard var data = try? JSONEncoder().encode(command) else { return }
+        data.append(0x0A)
+        let s = sock.value
+        guard s >= 0 else { return }
+        data.withUnsafeBytes { raw in
+            var off = 0
+            while off < raw.count {
+                let n = write(s, raw.baseAddress!.advanced(by: off), raw.count - off)
+                if n <= 0 { break }
+                off += n
+            }
+        }
+    }
+
     private func apply(_ frame: Frame) {
         switch frame {
         case .hello(let h):
             host = h
         case .history(let batch):
             samples = Array(batch.suffix(windowSize))
+        case .control(let c):
+            control = c
         case .tick(let s):
             let prev = samples.last
             samples.append(s)
@@ -109,5 +143,17 @@ final class Client: ObservableObject {
             // are already looking is not an alert.
             alerts = engine.evaluate(AlertContext(now: s, prev: prev))
         }
+    }
+}
+
+
+/// Lock-guarded file descriptor shared between the reader thread and the
+/// main actor.
+final class FDBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: Int32 = -1
+    var value: Int32 {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
     }
 }

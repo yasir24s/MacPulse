@@ -18,6 +18,12 @@ final class SocketServer {
     private let host: HostInfo
     private let encoder = JSONEncoder()
 
+    /// Invoked for a command that passed the peer check. Returns the state
+    /// to echo back.
+    var onCommand: ((Command) -> ControlState)?
+    /// Current control state, for the handshake.
+    var currentState: (() -> ControlState)?
+
     init(path: String, capacity: Int, host: HostInfo) {
         self.path = path
         self.capacity = capacity
@@ -76,7 +82,59 @@ final class SocketServer {
         guard send(fd, .hello(host)), send(fd, .history(backlog)) else {
             close(fd); return
         }
+        if let st = currentState?(), !send(fd, .control(st)) { close(fd); return }
         lock.lock(); clients.append(fd); lock.unlock()
+        readCommands(from: fd)
+    }
+
+    /// The write path is open to any local reader -- telemetry is harmless.
+    /// The *command* path is not: this daemon is root, so a command is only
+    /// honoured from the console user or root itself. Without this, any
+    /// sandboxed helper running on the machine could set your fan.
+    private func peerAuthorised(_ fd: Int32) -> Bool {
+        var cred = xucred()
+        var len = socklen_t(MemoryLayout<xucred>.size)
+        guard getsockopt(fd, SOL_LOCAL, LOCAL_PEERCRED, &cred, &len) == 0,
+              cred.cr_version == XUCRED_VERSION else { return false }
+        let uid = cred.cr_uid
+        if uid == 0 { return true }
+        var st = stat()
+        guard stat("/dev/console", &st) == 0 else { return false }
+        return uid == st.st_uid
+    }
+
+    private func readCommands(from fd: Int32) {
+        let authorised = peerAuthorised(fd)
+        var buf = Data()
+        var chunk = [UInt8](repeating: 0, count: 16384)
+        let decoder = JSONDecoder()
+        while true {
+            let n = read(fd, &chunk, chunk.count)
+            guard n > 0 else { break }
+            buf.append(contentsOf: chunk[0..<n])
+            while let nl = buf.firstIndex(of: 0x0A) {
+                let line = buf[buf.startIndex..<nl]
+                buf.removeSubrange(buf.startIndex...nl)
+                guard let cmd = try? decoder.decode(Command.self, from: Data(line)) else { continue }
+                guard authorised else {
+                    FileHandle.standardError.write(Data(
+                        "macpulsed: rejected command from unauthorised peer\n".utf8))
+                    continue
+                }
+                // Every accepted command is logged. A root daemon that can be
+                // driven should leave a record of who drove it.
+                FileHandle.standardError.write(Data("macpulsed: command \(cmd)\n".utf8))
+                if let st = onCommand?(cmd) { _ = send(fd, .control(st)) }
+            }
+        }
+        lock.lock(); clients.removeAll { $0 == fd }; lock.unlock()
+        close(fd)
+    }
+
+    /// Push a control-state change to everyone.
+    func broadcastState(_ st: ControlState) {
+        lock.lock(); let targets = clients; lock.unlock()
+        for fd in targets { _ = send(fd, .control(st)) }
     }
 
     func broadcast(_ sample: Sample) {

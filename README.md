@@ -257,3 +257,60 @@ Two safeguards, because this deletes things:
 
 It uses `tmutil thinlocalsnapshots <vol> <bytes> 4`, which thins *toward* a
 target and lets the OS keep what it still needs, rather than blanket-deleting.
+
+## Fan control
+
+MacPulse can drive the fan, not just watch it. Three modes per fan: **Auto**
+(the SMC's own curve — MacPulse writes nothing), **Manual** (one speed), and
+**Curve** (target interpolated from die temperature).
+
+The mechanism is two SMC keys: `F<i>Md` selects firmware (0) or forced (1)
+control, and `F<i>Tg` carries the target. Reading them is unprivileged;
+writing needs root, which the daemon already has. Nothing else is required —
+this is exactly what Macs Fan Control does, and `F0Md = 1` is how you can see
+it is running.
+
+### Why the failsafe is the feature
+
+The dangerous state is not "wrong speed". It is **forced to a low speed with
+nothing left supervising it** — the daemon dies, `F0Md` stays 1, and the
+machine cooks under a firmware curve that is no longer in control. So `auto`
+is the resting state and every failure path unwinds to it:
+
+- **Thermal failsafe.** Die at or above 90 °C releases the fan to firmware
+  regardless of policy, and only re-engages below 80 °C. The gap is
+  hysteresis; without it a machine sitting on the threshold would hand the
+  fan back and forth every second.
+- **Blind curve.** Curve mode with no die temperature reverts to firmware. A
+  curve without its input is not a curve, and a stale target is worse than
+  no target.
+- **Hardware clamp.** Targets are clamped to the fan's own reported
+  `F<i>Mn`/`F<i>Mx`, not to constants, so no policy can command a speed the
+  hardware does not support.
+- **Exit paths.** `atexit` plus SIGTERM/SIGINT/SIGHUP/SIGQUIT all release the
+  fan. SIGKILL cannot be caught, which is precisely why the thermal failsafe
+  above must be able to save the machine without any of this running.
+- **Default is auto.** Installing changes nothing until a mode is chosen.
+
+Targets are only written when they move by more than 25 rpm, so a curve does
+not generate a pointless SMC write every second.
+
+### Another tool will fight you
+
+Two controllers writing `F0Md`/`F0Tg` means last-writer-wins, and both will
+keep re-asserting. The daemon detects this — in Auto, if the fan still reports
+forced, the panel names the likely culprit (Macs Fan Control, TG Pro, iStat
+Menus) instead of silently overwriting it. **Quit the other tool before using
+Manual or Curve**; setting it to "Auto" in its own UI is not always enough,
+since its privileged helper can keep running.
+
+### Command authorisation
+
+Telemetry is readable by anyone on the machine; commands are not. The daemon
+checks `LOCAL_PEERCRED` on the connection and accepts `setPolicy` only from
+root or the console user, logging every accepted command. This is a weaker
+guarantee than the per-action authentication used for snapshot reclaim — a
+process already running as you can change your fan policy without a password
+— accepted deliberately, because a curve has to persist and a per-action
+prompt cannot express continuous control. The hardware clamp and thermal
+failsafe bound the worst case to "a fan at a speed the hardware allows".

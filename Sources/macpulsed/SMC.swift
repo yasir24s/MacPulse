@@ -32,6 +32,8 @@ final class SMCFans {
     private static let handleYPCEvent: UInt32 = 2
     private static let cmdReadKey: UInt8 = 5
     private static let cmdKeyInfo: UInt8 = 9
+    /// kSMCWriteKey. Same parameter block as a read, payload filled in.
+    private static let cmdWriteKey: UInt8 = 6
 
     private let conn: io_connect_t
     /// Index, min and max are fixed for the life of the machine, so they are
@@ -63,12 +65,45 @@ final class SMCFans {
 
     deinit { IOServiceClose(conn) }
 
-    /// Current speed of every fan. Only the `Ac` key is read per tick.
+    /// Current speed of every fan, plus whether something is forcing it.
+    /// Mode and target are read every tick rather than cached: another tool
+    /// can take the fan at any moment, and a stale "auto" would be a lie.
     func reading() -> [FanSample] {
         statics.compactMap { f in
             guard let rpm = SMCFans.read(conn, "F\(f.index)Ac").flatMap(SMCFans.decode) else { return nil }
-            return FanSample(index: f.index, rpm: rpm, minRPM: f.min, maxRPM: f.max)
+            let mode = SMCFans.read(conn, "F\(f.index)Md").flatMap(SMCFans.decode) ?? 0
+            let tgt = SMCFans.read(conn, "F\(f.index)Tg").flatMap(SMCFans.decode) ?? 0
+            return FanSample(index: f.index, rpm: rpm, minRPM: f.min, maxRPM: f.max,
+                             forced: mode >= 1, targetRPM: tgt)
         }
+    }
+
+    var fanCount: Int { statics.count }
+    func range(_ index: Int) -> (min: Double, max: Double)? {
+        statics.first { $0.index == index }.map { ($0.min, $0.max) }
+    }
+
+    // MARK: - control
+
+    /// Hand the fan back to the SMC's own curve. This is the safe state and
+    /// the one everything unwinds to; it must never be allowed to fail
+    /// silently, so the result is returned rather than discarded.
+    @discardableResult
+    func releaseToAuto(_ index: Int) -> Bool {
+        SMCFans.write(conn, "F\(index)Md", ui8: 0)
+    }
+
+    /// Force a target speed. The caller is responsible for clamping to the
+    /// fan's own range; this deliberately does not second-guess it, because
+    /// the clamp belongs with the policy that also enforces the failsafe.
+    @discardableResult
+    func force(_ index: Int, rpm: Double) -> Bool {
+        // Order matters. Set the target first, then switch to forced mode --
+        // the reverse briefly forces the fan to whatever stale target the SMC
+        // still held, which on a machine that was previously at maximum means
+        // an audible spike every time a curve nudges the speed.
+        guard SMCFans.write(conn, "F\(index)Tg", float: rpm) else { return false }
+        return SMCFans.write(conn, "F\(index)Md", ui8: 1)
     }
 
     // MARK: - raw key access
@@ -115,6 +150,41 @@ final class SMCFans {
         req[offData8] = cmdReadKey
         guard let out = call(conn, req) else { return nil }
         return (type, Array(out[offBytes..<(offBytes + size)]))
+    }
+
+    /// Write a key, using the width and type the SMC itself reports for it.
+    /// Writing a guessed width is how you corrupt an adjacent key.
+    private static func write(_ conn: io_connect_t, _ name: String, bytes: [UInt8],
+                              expectType: String) -> Bool {
+        let key = fourCC(name)
+        var info = [UInt8](repeating: 0, count: paramSize)
+        put32(&info, offKey, key)
+        info[offData8] = cmdKeyInfo
+        guard let meta = call(conn, info) else { return false }
+        let size = Int(get32(meta, offDataSize))
+        let type = get32(meta, offDataType)
+        let typeName = String(bytes: (0..<4).map { UInt8((type >> (8 * (3 - $0))) & 0xff) },
+                              encoding: .ascii) ?? ""
+        guard size == bytes.count, typeName == expectType else { return false }
+
+        var req = [UInt8](repeating: 0, count: paramSize)
+        put32(&req, offKey, key)
+        put32(&req, offDataSize, UInt32(size))
+        put32(&req, offDataType, type)
+        req[offData8] = cmdWriteKey
+        for (i, b) in bytes.enumerated() { req[offBytes + i] = b }
+        return call(conn, req) != nil
+    }
+
+    private static func write(_ conn: io_connect_t, _ name: String, ui8 v: UInt8) -> Bool {
+        write(conn, name, bytes: [v], expectType: "ui8 ")
+    }
+
+    private static func write(_ conn: io_connect_t, _ name: String, float v: Double) -> Bool {
+        let bits = Float(v).bitPattern
+        return write(conn, name, bytes: [UInt8(bits & 0xff), UInt8((bits >> 8) & 0xff),
+                                         UInt8((bits >> 16) & 0xff), UInt8((bits >> 24) & 0xff)],
+                     expectType: "flt ")
     }
 
     private static func decode(_ v: (type: UInt32, bytes: [UInt8])) -> Double? {

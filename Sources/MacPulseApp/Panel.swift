@@ -152,6 +152,8 @@ struct Panel: View {
             // branch rather than inside it.
             ForEach(s.fans, id: \.index) { f in
                 Divider().opacity(0.4)
+                FanControlView(client: client, fan: f)
+                    .padding(.bottom, 2)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(String(format: "%.0f rpm", f.rpm))
                         .font(.system(size: 15, weight: .semibold).monospacedDigit())

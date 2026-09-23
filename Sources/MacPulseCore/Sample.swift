@@ -162,13 +162,22 @@ public struct TempSensor: Codable, Sendable, Hashable {
 public struct FanSample: Codable, Sendable, Hashable {
     public var index: Int
     public var rpm: Double
+    /// SMC F<i>Md. false = firmware curve, true = a target is being forced.
+    /// Reported rather than assumed: another tool may own the fan, and
+    /// MacPulse must not present someone else's setpoint as its own.
+    public var forced: Bool = false
+    /// SMC F<i>Tg, the commanded speed. Actual overshoots it slightly while
+    /// the controller hunts -- that gap is normal, not an error.
+    public var targetRPM: Double = 0
     /// Floor and ceiling as the SMC reports them. Both are needed to say
     /// anything about a raw RPM figure: 7,200 is alarming on one machine and
     /// unremarkable on another, and only the ratio travels.
     public var minRPM: Double
     public var maxRPM: Double
-    public init(index: Int, rpm: Double, minRPM: Double, maxRPM: Double) {
+    public init(index: Int, rpm: Double, minRPM: Double, maxRPM: Double,
+                forced: Bool = false, targetRPM: Double = 0) {
         self.index = index; self.rpm = rpm; self.minRPM = minRPM; self.maxRPM = maxRPM
+        self.forced = forced; self.targetRPM = targetRPM
     }
     /// Position between floor and ceiling, 0...1.
     public var fraction: Double {
@@ -207,6 +216,7 @@ public struct HostInfo: Codable, Sendable {
 /// Daemon -> app frames, newline-delimited JSON over a Unix socket.
 public enum Frame: Codable, Sendable {
     case hello(HostInfo)
+    case control(ControlState)
     /// Replayed ring buffer, oldest first, sent once on connect.
     case history([Sample])
     case tick(Sample)
@@ -217,4 +227,91 @@ public enum Transport {
     public static let sampleIntervalMS = 1000
     /// Ring buffer depth held by the daemon: 6 hours at 1 Hz.
     public static let ringCapacity = 6 * 60 * 60
+}
+
+
+// MARK: - Fan control
+
+/// How a fan is being driven.
+public enum FanMode: String, Codable, Sendable, CaseIterable {
+    /// Hand the fan back to the SMC's own curve. Always safe, always the
+    /// state the daemon restores to when anything goes wrong.
+    case auto
+    /// Hold one speed regardless of temperature.
+    case manual
+    /// Interpolate a target from die temperature.
+    case curve
+}
+
+/// A temperature/speed breakpoint. Between points the target is linear; below
+/// the first and above the last it is flat.
+public struct CurvePoint: Codable, Sendable, Hashable, Identifiable {
+    public var id: Double { tempC }
+    public var tempC: Double
+    public var rpm: Double
+    public init(tempC: Double, rpm: Double) { self.tempC = tempC; self.rpm = rpm }
+}
+
+public struct FanPolicy: Codable, Sendable, Equatable {
+    public var mode: FanMode
+    /// Used when mode == .manual.
+    public var manualRPM: Double
+    /// Used when mode == .curve. Kept sorted by temperature.
+    public var curve: [CurvePoint]
+
+    public init(mode: FanMode = .auto, manualRPM: Double = 0, curve: [CurvePoint] = []) {
+        self.mode = mode; self.manualRPM = manualRPM; self.curve = curve
+    }
+
+    /// A deliberately conservative default: silent until the die is genuinely
+    /// warm, full tilt well before anything is at risk. Tuned for an M2 whose
+    /// sustained load sits near 60 C.
+    public static let defaultCurve: [CurvePoint] = [
+        CurvePoint(tempC: 45, rpm: 1200),
+        CurvePoint(tempC: 60, rpm: 2200),
+        CurvePoint(tempC: 75, rpm: 4000),
+        CurvePoint(tempC: 88, rpm: 7200),
+    ]
+
+    /// Target for a die temperature, clamped to the fan's own range by the
+    /// caller. Flat outside the end points -- extrapolating a fan curve past
+    /// its measured range is how you get a negative target.
+    public func target(forDieTemp t: Double) -> Double? {
+        switch mode {
+        case .auto: return nil
+        case .manual: return manualRPM
+        case .curve:
+            let pts = curve.sorted { $0.tempC < $1.tempC }
+            guard let first = pts.first, let last = pts.last else { return nil }
+            if t <= first.tempC { return first.rpm }
+            if t >= last.tempC { return last.rpm }
+            for (a, b) in zip(pts, pts.dropFirst()) where t >= a.tempC && t <= b.tempC {
+                let f = (t - a.tempC) / (b.tempC - a.tempC)
+                return a.rpm + f * (b.rpm - a.rpm)
+            }
+            return last.rpm
+        }
+    }
+}
+
+/// Live control state, so the UI never has to infer what the daemon is doing.
+public struct ControlState: Codable, Sendable, Equatable {
+    public var policy: FanPolicy
+    /// True while the thermal failsafe has overridden the policy.
+    public var failsafeEngaged: Bool
+    /// Set when another process is driving the fan, so the UI can say so
+    /// instead of fighting it silently.
+    public var foreignController: String?
+    public var lastError: String?
+    public init(policy: FanPolicy, failsafeEngaged: Bool = false,
+                foreignController: String? = nil, lastError: String? = nil) {
+        self.policy = policy; self.failsafeEngaged = failsafeEngaged
+        self.foreignController = foreignController; self.lastError = lastError
+    }
+}
+
+/// App -> daemon. The only writes the protocol permits.
+public enum Command: Codable, Sendable {
+    case setPolicy(FanPolicy)
+    case requestState
 }
