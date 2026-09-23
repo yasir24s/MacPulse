@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>            <string>com.yasir.macpulse.app</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/yasir24s/MacPulse/build/MacPulse.app/Contents/MacOS/MacPulse</string>
+    </array>
+    <key>RunAtLoad</key>        <true/>
+    <!-- Deliberately NOT KeepAlive. Quit in the panel means quit; relaunching
+         a menu bar item the user just dismissed is a bug, not a feature. The
+         daemon keeps collecting either way, so the ring buffer stays intact
+         and reopening the app replays it. -->
+    <key>KeepAlive</key>        <false/>
+    <key>ProcessType</key>      <string>Interactive</string>
+    <key>StandardErrorPath</key><string>/tmp/macpulse-app.err</string>
+    <key>StandardOutPath</key>  <string>/dev/null</string>
+</dict>
+</plist>
