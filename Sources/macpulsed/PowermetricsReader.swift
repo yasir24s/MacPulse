@@ -15,12 +15,21 @@ final class PowermetricsReader {
 
     private var process: Process?
     private let onSample: (Reading) -> Void
+    /// Last time a sample block was parsed. A powermetrics that stops emitting
+    /// WITHOUT exiting is invisible to terminationHandler -- observed after a
+    /// sleep/wake on a 17 h-old daemon, child alive and silent, every chart
+    /// frozen. Liveness has to be measured, not inferred from the process
+    /// still existing.
+    private let lastSample = Atomic(Date())
+    private var intervalMS = 1000
 
     init(onSample: @escaping (Reading) -> Void) {
         self.onSample = onSample
     }
 
     func start(intervalMS: Int) {
+        self.intervalMS = intervalMS
+        startWatchdog()
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/powermetrics")
         p.arguments = [
@@ -64,6 +73,26 @@ final class PowermetricsReader {
         }
     }
 
+    /// Kill a silent child so terminationHandler restarts it. Ten missed
+    /// intervals is well clear of normal jitter and still catches a stall
+    /// inside a few seconds at 1 Hz.
+    private func startWatchdog() {
+        Thread.detachNewThread { [weak self] in
+            while true {
+                Thread.sleep(forTimeInterval: 5)
+                guard let self else { return }
+                let quiet = Date().timeIntervalSince(self.lastSample.value)
+                let limit = max(Double(self.intervalMS) / 1000 * 10, 20)
+                if quiet > limit, let p = self.process, p.isRunning {
+                    FileHandle.standardError.write(Data(
+                        "macpulsed: powermetrics silent for \(Int(quiet))s, restarting\n".utf8))
+                    p.terminate()
+                    kill(p.processIdentifier, SIGKILL)
+                }
+            }
+        }
+    }
+
     private func consume(_ line: String, into r: inout Reading) {
         func intAfter(_ prefix: String) -> Int? {
             guard let range = line.range(of: prefix) else { return nil }
@@ -88,8 +117,22 @@ final class PowermetricsReader {
                 r.pressure = line[line.index(after: colon)...]
                     .trimmingCharacters(in: .whitespaces)
             }
+            lastSample.value = Date()
             onSample(r)
             r = Reading()
         }
+    }
+}
+
+
+/// Minimal lock-guarded box. The watchdog and the parser thread both touch
+/// the liveness timestamp.
+final class Atomic<T>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var stored: T
+    init(_ v: T) { stored = v }
+    var value: T {
+        get { lock.lock(); defer { lock.unlock() }; return stored }
+        set { lock.lock(); stored = newValue; lock.unlock() }
     }
 }

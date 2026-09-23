@@ -55,7 +55,16 @@ final class SocketServer {
                 guard client >= 0 else { continue }
                 var on: Int32 = 1
                 setsockopt(client, SOL_SOCKET, SO_NOSIGPIPE, &on, socklen_t(MemoryLayout<Int32>.size))
-                self?.welcome(client)
+                // A client that stops reading must not be able to wedge the
+                // accept loop. Without this a single stuck peer blocked EVERY
+                // subsequent connection -- new clients got no frames at all,
+                // not even hello, because the loop never came back round.
+                var tv = timeval(tv_sec: 5, tv_usec: 0)
+                setsockopt(client, SOL_SOCKET, SO_SNDTIMEO, &tv,
+                           socklen_t(MemoryLayout<timeval>.size))
+                // Replaying the ring can be megabytes; do it off the accept
+                // thread so a slow reader delays only itself.
+                Thread.detachNewThread { self?.welcome(client) }
             }
         }
     }
