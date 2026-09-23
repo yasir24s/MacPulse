@@ -22,6 +22,10 @@ final class PowermetricsReader {
     /// still existing.
     private let lastSample = Atomic(Date())
     private var intervalMS = 1000
+    /// The watchdog is started once for the life of the reader. start() is
+    /// re-entered on every restart, and spawning a thread there leaked one
+    /// per cycle -- three watchdogs all racing to kill the same child.
+    private var watchdogStarted = false
 
     init(onSample: @escaping (Reading) -> Void) {
         self.onSample = onSample
@@ -29,7 +33,16 @@ final class PowermetricsReader {
 
     func start(intervalMS: Int) {
         self.intervalMS = intervalMS
-        startWatchdog()
+        // Reset liveness BEFORE spawning. Without this the restarted child
+        // inherits the stale timestamp that triggered the kill, so the
+        // watchdog shoots it before it can emit a first sample -- an
+        // infinite kill loop in which powermetrics is never alive long
+        // enough to clear the very condition being watched for.
+        lastSample.value = Date()
+        if !watchdogStarted {
+            watchdogStarted = true
+            startWatchdog()
+        }
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/powermetrics")
         p.arguments = [
@@ -82,6 +95,9 @@ final class PowermetricsReader {
                 Thread.sleep(forTimeInterval: 5)
                 guard let self else { return }
                 let quiet = Date().timeIntervalSince(self.lastSample.value)
+                // powermetrics takes a full interval to emit its first block,
+                // and longer on a loaded machine; 20 s is the floor so a cold
+                // start is never mistaken for a stall.
                 let limit = max(Double(self.intervalMS) / 1000 * 10, 20)
                 if quiet > limit, let p = self.process, p.isRunning {
                     FileHandle.standardError.write(Data(
