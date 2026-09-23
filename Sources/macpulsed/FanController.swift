@@ -15,10 +15,18 @@ final class FanController {
 
     /// Die temperature at which the policy is abandoned and the firmware
     /// takes over, whatever the user asked for.
-    private static let failsafeEngageC = 90.0
-    /// Hysteresis: well below engage, so a machine sitting at the threshold
-    /// does not oscillate between policy and firmware every tick.
-    private static let failsafeClearC = 80.0
+    ///
+    /// Measured, not guessed. A 4-core 20-26 W soak on Mac14,7 peaks at
+    /// 92.1 C with thermal pressure still Nominal the whole way -- that is
+    /// this machine working normally, not in danger. The first version of
+    /// this used 90 C, which sat *below* the normal working peak and would
+    /// have yanked the fan back to firmware in the middle of any long build,
+    /// precisely when a curve is most wanted. A failsafe that fires during
+    /// ordinary work is not a safety feature, it is a fault.
+    private static let failsafeEngageC = 100.0
+    /// Hysteresis, set below the measured working peak so that a machine
+    /// merely running hot does not sit latched in failsafe afterwards.
+    private static let failsafeClearC = 88.0
     /// Writing the same target every second is pointless SMC traffic; only
     /// write when the target actually moves by more than this.
     private static let rpmEpsilon = 25.0
