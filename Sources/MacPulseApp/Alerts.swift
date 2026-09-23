@@ -21,6 +21,10 @@ import MacPulseCore
 /// - **Cooldown.** Even a genuinely sustained condition is worth saying once.
 ///   Without this, a machine that is legitimately thrashing for an hour sends
 ///   3,600 notifications and teaches you to ignore all of them.
+/// - **Ripening.** A rule may require its condition to hold continuously for
+///   some time before it counts. Most interesting conditions here are normal
+///   in bursts and only meaningful when sustained: a fan hits maximum during
+///   any long compile, and that is the fan working, not a fault.
 
 struct Alert: Identifiable, Equatable {
     enum Severity { case warning, critical }
@@ -41,6 +45,22 @@ struct AlertRule {
     let id: String
     let title: String
     let severity: Alert.Severity
+    /// How long `fire` must return non-nil *continuously* before the alert is
+    /// reported at all. Zero means report on the first tick, which is right
+    /// for conditions that are already unambiguous the instant they appear
+    /// (a throttled swapout, a disk floor) and wrong for ones that are normal
+    /// in bursts.
+    var sustainFor: TimeInterval = 0
+    /// How long `clear` must hold *continuously* before the alert retires.
+    ///
+    /// The mirror of `sustainFor`, and load-bearing for anything measured as
+    /// a per-second rate. Real memory pressure is bursty at 1 Hz: a captured
+    /// 25-second thrash episode on this machine contained individual seconds
+    /// with `swapOut` at exactly zero, because the kernel writes swap in
+    /// bursts. Retiring on the first quiet tick made the alert unreachable --
+    /// 23 of 88 ticks matched, but the longest unbroken run was 8 s against a
+    /// 30 s gate, so it never fired at all.
+    var clearFor: TimeInterval = 0
     /// Return a detail string to fire; nil means "not firing".
     let fire: (AlertContext) -> String?
     /// Must be true before a firing alert is considered over.
@@ -48,12 +68,24 @@ struct AlertRule {
 }
 
 final class AlertEngine {
-    /// Alert id -> when it started firing.
-    private var active: [String: Date] = [:]
+    /// Alert id -> when the condition was *first* seen. Not reset by a gap:
+    /// ripening measures how long the episode has been going, not how long
+    /// the predicate has been unbroken.
+    private var firstFired: [String: Date] = [:]
+    /// Alert id -> the most recent tick whose `fire` returned a detail.
+    private var lastFired: [String: Date] = [:]
+    /// Last detail seen, so the banner stays informative through a gap.
+    private var lastDetail: [String: String] = [:]
     /// Alert id -> when we last sent a notification for it.
     private var lastNotified: [String: Date] = [:]
     private let cooldown: TimeInterval = 300
     private var askedForPermission = false
+
+    /// Injectable so recorded history can be replayed against the engine at
+    /// full speed instead of in real time.
+    private let now: () -> Date
+
+    init(now: @escaping () -> Date = Date.init) { self.now = now }
 
     // UNUserNotificationCenter traps outright in a process with no bundle,
     // which is exactly what `swift run MacPulseApp` is. Fail soft so the app
@@ -72,33 +104,43 @@ final class AlertEngine {
     /// firing, newest first. Side effect: posts notifications, rate-limited.
     func evaluate(_ ctx: AlertContext) -> [Alert] {
         var out: [Alert] = []
+        let t = now()
         for rule in AlertEngine.rules {
-            let detail = rule.fire(ctx)
-            let isActive = active[rule.id] != nil
-
-            if let detail {
-                if !isActive { active[rule.id] = Date() }
-                let alert = Alert(id: rule.id, title: rule.title,
-                                  detail: detail, severity: rule.severity)
-                out.append(alert)
-                notifyIfDue(alert)
-            } else if isActive, rule.clear(ctx) {
-                // Only a satisfied clear predicate retires an alert. A rule
-                // whose fire() merely stopped returning a detail stays active,
-                // which is what gives the hysteresis its teeth.
-                active.removeValue(forKey: rule.id)
-                lastNotified.removeValue(forKey: rule.id)
-            } else if isActive {
-                out.append(Alert(id: rule.id, title: rule.title,
-                                 detail: "holding", severity: rule.severity))
+            if let detail = rule.fire(ctx) {
+                if firstFired[rule.id] == nil { firstFired[rule.id] = t }
+                lastFired[rule.id] = t
+                lastDetail[rule.id] = detail
             }
+            guard let since = firstFired[rule.id] else { continue }
+
+            // Retire only once the clear predicate holds *and* the condition
+            // has been quiet for clearFor. Both halves matter: clear() alone
+            // retires on a single bursty zero, and quiet alone would retire a
+            // condition that is still plainly true but momentarily flat.
+            let quietFor = t.timeIntervalSince(lastFired[rule.id] ?? since)
+            if quietFor >= rule.clearFor, rule.clear(ctx) {
+                firstFired.removeValue(forKey: rule.id)
+                lastFired.removeValue(forKey: rule.id)
+                lastDetail.removeValue(forKey: rule.id)
+                lastNotified.removeValue(forKey: rule.id)
+                continue
+            }
+
+            // Still ripening: the condition holds but not yet for long enough
+            // to be worth your attention. Tracked, not reported.
+            guard t.timeIntervalSince(since) >= rule.sustainFor else { continue }
+            let alert = Alert(id: rule.id, title: rule.title,
+                              detail: lastDetail[rule.id] ?? "holding",
+                              severity: rule.severity)
+            out.append(alert)
+            notifyIfDue(alert, at: t)
         }
         return out.sorted { ($0.severity == .critical ? 0 : 1) < ($1.severity == .critical ? 0 : 1) }
     }
 
-    private func notifyIfDue(_ alert: Alert) {
-        if let last = lastNotified[alert.id], Date().timeIntervalSince(last) < cooldown { return }
-        lastNotified[alert.id] = Date()
+    private func notifyIfDue(_ alert: Alert, at t: Date) {
+        if let last = lastNotified[alert.id], t.timeIntervalSince(last) < cooldown { return }
+        lastNotified[alert.id] = t
         guard let center else { return }
         let content = UNMutableNotificationContent()
         content.title = alert.title
@@ -156,40 +198,79 @@ final class AlertEngine {
             clear: { $0.now.thermalPressure == "Nominal" }
         ),
 
+        // A fan at its ceiling is not a fault -- it is the cooling system
+        // doing exactly its job -- so this is a warning, and it has to hold
+        // for two minutes first. Every sustained compile pins this fan; only
+        // one that stays pinned is telling you something.
+        AlertRule(
+            id: "fan-max",
+            title: "Fan at maximum",
+            severity: .warning,
+            sustainFor: 120,
+            fire: { ctx in
+                guard let f = ctx.now.fans.max(by: { $0.fraction < $1.fraction }),
+                      f.fraction >= 0.95 else { return nil }
+                return String(format: "%.0f rpm — %.0f%% of its %.0f–%.0f range, held for 2 min.",
+                              f.rpm, f.fraction * 100, f.minRPM, f.maxRPM)
+            },
+            // Fires at 95% of range, clears at 75%: a fan oscillating around
+            // its ceiling must not reopen the alert every few seconds. A Mac
+            // with no fans reports none, so this can never fire on an Air.
+            clear: { ctx in
+                guard let f = ctx.now.fans.max(by: { $0.fraction < $1.fraction }) else { return true }
+                return f.fraction < 0.75
+            }
+        ),
+
         thrashRule,
     ]
 
-    /// TODO(yasir): the one rule that needs your judgement rather than mine.
+    /// Sustained thrash: pages evicted to swap and immediately faulted back.
     ///
-    /// Everything above keys off something objective -- a counter climbed, a
-    /// disk hit a floor, the OS said it is throttling. Thrash has no such
-    /// line. `thrashRatio` is swapins/swapouts clamped to 2.0, and the README
-    /// already says ratio near 1.0 means pages are evicted and immediately
-    /// faulted back. What it does not say is when that is worth interrupting
-    /// you, and that is a genuine judgement call with real trade-offs:
+    /// Thresholds are calibrated against 498 samples of this machine's own
+    /// history rather than chosen for roundness. In that window `swapOut` was
+    /// zero at the 99th percentile, `thrashRatio` cleared 0.5 in exactly one
+    /// tick out of 498, and the longest consecutive run above any candidate
+    /// threshold was one second. So:
     ///
-    /// - **Ratio alone is not enough.** At 2 swapins and 2 swapouts per second
-    ///   the ratio is a perfect 1.0 and nothing is wrong. You almost certainly
-    ///   want to gate on absolute rate too -- say `swapOutPagesPerSec > N` --
-    ///   or the alert fires on an idle machine.
-    /// - **Duration matters more than instant.** Xcode starting up will thrash
-    ///   for four seconds and that is just what a build does. Sustained thrash
-    ///   is the signal. You have `ctx.prev` for one tick back; for a longer
-    ///   window this rule would need its own state.
-    /// - **Pick the clear margin deliberately.** Firing at 0.8 and clearing at
-    ///   0.8 gives you a rule that chatters all afternoon.
+    /// - **Ratio alone is useless.** It is `min(in/out, 2.0)` and defined as
+    ///   zero whenever `out` is zero, so it reads 0.00 almost always and hits
+    ///   1.0 on two swapins against two swapouts -- a perfectly idle machine.
+    ///   The absolute rate gate is what makes it mean anything.
+    /// - **100 pages/s** of swapouts is ~1.6 MB/s at this page size: small
+    ///   enough to catch real pressure early, far above anything observed at
+    ///   rest.
+    /// - **0.7, not 1.0.** Evicting 100 pages and faulting 70 back is already
+    ///   thrash; waiting for parity would miss most of it. The 2.0 cap means
+    ///   "faulting back far more than we evict" also clears this bar, which is
+    ///   correct -- that is thrash too.
+    /// - **30 s sustained.** Xcode starting up thrashes for a few seconds and
+    ///   that is just what a build does. Against the observed data -- longest
+    ///   run one second -- this has a thirtyfold margin, which is why the
+    ///   replay test over that history fires zero times.
     ///
-    /// Fill in `fire` and `clear` below. Returning nil from `fire` (as it does
-    /// now) simply means the rule never fires, so the app is fully working
-    /// until you do.
+    /// Clearing is deliberately wide on *both* axes: half the rate, or a ratio
+    /// well under the fire line. A machine oscillating around 100 pages/s must
+    /// not reopen this every few seconds.
     static let thrashRule = AlertRule(
         id: "thrash",
         title: "Memory thrashing",
         severity: .critical,
+        sustainFor: 30,
+        // 20 s of genuine quiet before retiring. Measured against a real
+        // episode: swapouts stop for up to three consecutive seconds mid-
+        // thrash, so anything under ~5 s here makes the 30 s gate unreachable.
+        clearFor: 20,
         fire: { ctx in
-            _ = ctx
-            return nil
+            let out = ctx.now.swapOutPagesPerSec
+            let ratio = ctx.now.thrashRatio
+            guard out >= 100, ratio >= 0.7 else { return nil }
+            return String(format: "%.0f pages/s out, %.0f in (ratio %.2f) for 30 s — "
+                                + "pages are being evicted and faulted straight back.",
+                          out, ctx.now.swapInPagesPerSec, ratio)
         },
-        clear: { _ in true }
+        clear: { ctx in
+            ctx.now.swapOutPagesPerSec < 50 || ctx.now.thrashRatio < 0.3
+        }
     )
 }

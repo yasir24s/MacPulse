@@ -142,9 +142,64 @@ clear predicate rather than the negation of its fire predicate, so a value
 resting exactly on the threshold cannot chatter, and notifications are limited
 to one per five minutes per rule.
 
-Rules are still readings, not verdicts: they name which number crossed which
-line you set. `thrashRule` is deliberately left unimplemented — where thrash
-becomes worth an interruption is a judgement, not a constant.
+A rule may also set `sustainFor`, which holds it un-reported until its
+condition has held *continuously* for that long. Most conditions worth
+watching here are normal in bursts: the fan hits maximum during any long
+compile, and that is the cooling system working rather than a fault. `fan-max`
+uses 120 s; `swapout-throttled` and `disk-floor` use zero, because both are
+already unambiguous the instant they appear.
+
+Current rules: `swapout-throttled` (critical, on the counter *climbing*, not
+its value), `disk-floor` (critical, under 10 GB, clears above 15), `thermal`
+(warning, Heavy or worse, clears only at Nominal), `fan-max` (warning, at 95%
+of the fan's own range for two minutes, clears at 75%), and `thrash` below.
+
+Rules are readings, not verdicts: they name which number crossed which line.
+
+### Calibrating the thrash rule
+
+`thrashRatio` on its own cannot carry an alert. It is `min(in/out, 2.0)` and
+defined as zero whenever `out` is zero, so across 605 samples of this
+machine's own history it read 0.00 at the 99th percentile and cleared 0.5 in
+exactly **one tick**. It also reads a perfect 1.0 on two swapins against two
+swapouts, which is an idle machine. The absolute-rate gate is what gives it
+meaning.
+
+The rule therefore fires on `swapOut >= 100 pages/s` (~1.6 MB/s) **and**
+`ratio >= 0.7`, sustained 30 s. Evicting 100 pages and faulting 70 straight
+back is already thrash; waiting for parity would miss most of it. The 2.0 cap
+means "faulting back more than we evict" also clears the bar, which is correct.
+
+30 s comes from the data: the longest consecutive run above any candidate
+threshold in that history was **one second**, a thirtyfold margin. Replaying
+all 605 real samples fires zero times — no false positives on observed idle
+behaviour. Clearing is wide on both axes (rate under 50, *or* ratio under 0.3)
+so a machine oscillating around the fire line cannot reopen it.
+
+### What an induced episode changed
+
+The thresholds above survived a deliberate memory-pressure test; the *engine*
+did not. Cycling a 3 GB working set for 75 s produced a genuine 25-second
+thrash episode — swapouts peaking at 31,774 pages/s, free memory down to 9%,
+ratio swinging between 0.36 and the 2.0 cap.
+
+Real thrash is **bursty**. The kernel writes swap in batches, so individual
+seconds inside a sustained episode show `swapOut` at exactly zero. Under the
+original engine — which retired an alert the moment `clear` held for one tick
+— those zero-seconds reset the ripening clock. 23 of 88 ticks matched the fire
+predicate, but the longest unbroken run was **8 s against a 30 s gate**, so the
+rule would have sat silent through the entire episode. Every synthetic test
+passed, because synthetic thrash is smooth.
+
+The fix is `clearFor`, the mirror of `sustainFor`: the clear predicate must
+hold *continuously* before an alert retires, and a gap no longer resets
+ripening. `thrash` uses 20 s. Replaying the captured episode through the real
+engine now reports on 46 ticks, first at index 30 — exactly the gate — and
+retires when the machine recovers, while the 605 idle samples still fire zero
+times.
+
+Both recordings are kept as fixtures; `AlertEngine` takes an injectable clock
+so they replay at full speed instead of in real time.
 
 ## Network counters are 32-bit, whatever the header says
 
