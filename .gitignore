@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Swift Package Manager build output
+.build/
+build/
+DerivedData/
+*.xcuserstate
+xcuserdata/
+
+# Signed app bundles
+*.app/
+*.dSYM/
+
+# Preview raster from Scripts/generate-icons.sh -- documentation only, not a
+# build input. The icns and menu bar templates it also produces ARE committed,
+# so building needs no rsvg-convert.
+Resources/preview-icon.png

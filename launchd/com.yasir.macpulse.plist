@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>            <string>com.yasir.macpulse</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/libexec/macpulsed</string>
+    </array>
+    <key>RunAtLoad</key>        <true/>
+    <!-- powermetrics dying must not silently flatline the charts; the daemon
+         restarts it internally, and launchd is the backstop if the daemon
+         itself dies. -->
+    <key>KeepAlive</key>        <true/>
+    <key>ProcessType</key>      <string>Background</string>
+    <!-- Nice it down: a monitor must never compete with the work it measures,
+         least of all on a memory-constrained machine. -->
+    <key>Nice</key>             <integer>5</integer>
+    <key>StandardErrorPath</key><string>/var/log/macpulse.err</string>
+    <key>StandardOutPath</key>  <string>/dev/null</string>
+</dict>
+</plist>
