@@ -25,6 +25,9 @@ final class Client: ObservableObject {
     /// the symptom is otherwise a connected socket that never produces a
     /// sample, which looks exactly like a daemon that has quietly wedged.
     @Published private(set) var protocolMismatch = false
+    /// The menu bar label observes this, not the Client, so publishes the
+    /// label cannot show never redraw the status item.
+    let menuBar = MenuBarModel()
 
     private let engine = AlertEngine()
 
@@ -157,15 +160,25 @@ final class Client: ObservableObject {
         case .history(let batch):
             samples = Array(batch.suffix(windowSize))
         case .control(let c):
-            control = c
+            // The daemon resends control state every tick. Assigning an equal
+            // value still counts as a change and costs a full update pass.
+            if control != c { control = c }
         case .tick(let s):
             let prev = samples.last
-            samples.append(s)
-            if samples.count > windowSize { samples.removeFirst(samples.count - windowSize) }
+            // One assignment, one publish -- append then removeFirst on the
+            // @Published array announced two changes per tick.
+            var next = samples
+            next.append(s)
+            if next.count > windowSize { next.removeFirst(next.count - windowSize) }
+            samples = next
+            menuBar.update(s)
             // Evaluated on the tick rather than in the view: the panel is
             // closed almost all the time, and an alert you only get when you
             // are already looking is not an alert.
-            alerts = engine.evaluate(AlertContext(now: s, prev: prev))
+            // Still evaluated every tick (that is what fires notifications),
+            // but only published when the set of alerts actually changes.
+            let now = engine.evaluate(AlertContext(now: s, prev: prev))
+            if now != alerts { alerts = now }
         }
     }
 }

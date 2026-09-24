@@ -77,3 +77,54 @@ enum MenuBarReadout {
         s.fans.first.map { String(format: "%.0frpm", $0.rpm) }
     }
 }
+
+/// What the status item shows, published only when it would look different.
+///
+/// The label used to observe the whole Client, so every publish redrew the
+/// menu bar item -- samples, control state and alerts each fired every tick,
+/// arriving as separate frames and so separate update passes, and each pass
+/// had AppKit re-apply the status item (MenuBarExtraController.observeValue
+/// in the profile) even when the text was identical. Profiled with the panel
+/// closed, that was nearly all of the app's CPU. Now "Icon only" never
+/// redraws, and a numeric readout redraws at most once per tick.
+@MainActor
+final class MenuBarModel: ObservableObject {
+    enum Display: Equatable {
+        case icon
+        case text(String)
+        case stacked(String, String)
+    }
+
+    @Published private(set) var display: Display = .icon
+    private var latest: Sample?
+    private var defaultsObserver: NSObjectProtocol?
+
+    init() {
+        // The metric picker in the panel writes UserDefaults; recompute the
+        // moment it changes rather than waiting up to a tick.
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.recompute() }
+        }
+    }
+
+    func update(_ s: Sample) {
+        latest = s
+        recompute()
+    }
+
+    private func recompute() {
+        let raw = UserDefaults.standard.string(forKey: "menuBarMetric") ?? MenuBarMetric.icon.rawValue
+        let metric = MenuBarMetric(rawValue: raw) ?? .icon
+        let next: Display
+        if let s = latest, let p = metric.stacked(s) {
+            next = .stacked(p.top, p.bottom)
+        } else if let s = latest, let t = metric.readout(s) {
+            next = .text(t)
+        } else {
+            next = .icon
+        }
+        if next != display { display = next }
+    }
+}

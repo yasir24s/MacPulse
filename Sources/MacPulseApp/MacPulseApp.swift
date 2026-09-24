@@ -50,47 +50,57 @@ enum MenuBarMetric: String, CaseIterable, Identifiable {
 }
 
 struct MenuBarLabel: View {
-    @ObservedObject var client: Client
-    @AppStorage("menuBarMetric") private var metricRaw = MenuBarMetric.icon.rawValue
+    @ObservedObject var model: MenuBarModel
 
-    private var metric: MenuBarMetric { MenuBarMetric(rawValue: metricRaw) ?? .icon }
-
-    private var icon: NSImage? {
+    /// Loaded once. It used to be re-read from the bundle on every redraw.
+    private static let icon: NSImage? = {
         guard let url = Bundle.main.url(forResource: "MenuBarTemplate", withExtension: "png"),
               let img = NSImage(contentsOf: url) else { return nil }
         img.isTemplate = true
         return img
+    }()
+
+    @ViewBuilder private var iconView: some View {
+        // Template image so AppKit tints it for light/dark menu bars and
+        // inverts it on highlight. A coloured PNG would look wrong in half
+        // the cases and broken when the menu is open.
+        if let icon = Self.icon { Image(nsImage: icon) } else { Image(systemName: "chart.bar.fill") }
     }
 
     var body: some View {
-        // Stacked readout: the label may hold only ONE image, so icon and
-        // both lines arrive pre-composited and nothing else is drawn.
-        if let s = client.latest, let pair = metric.stacked(s),
-           let img = MenuBarReadout.image(icon: icon, top: pair.top, bottom: pair.bottom) {
-            Image(nsImage: img)
-        } else {
-            HStack(spacing: 3) {
-                // Template image so AppKit tints it for light/dark menu bars and
-                // inverts it on highlight. A coloured PNG would look wrong in half
-                // the cases and broken when the menu is open.
-                if let icon {
-                    Image(nsImage: icon)
-                } else {
-                    Image(systemName: "chart.bar.fill")
-                }
-                if let s = client.latest, let text = metric.readout(s) {
-                    // Monospaced digits: without them the whole menu bar shuffles
-                    // sideways every time a digit changes width.
-                    Text(text).font(.system(size: 11, weight: .medium).monospacedDigit())
-                }
+        switch model.display {
+        case .stacked(let top, let bottom):
+            // The label may hold only ONE image, so icon and both lines arrive
+            // pre-composited and nothing else is drawn.
+            if let img = MenuBarReadout.image(icon: Self.icon, top: top, bottom: bottom) {
+                Image(nsImage: img)
+            } else {
+                iconView
             }
+        case .text(let text):
+            HStack(spacing: 3) {
+                iconView
+                // Monospaced digits: without them the whole menu bar shuffles
+                // sideways every time a digit changes width.
+                Text(text).font(.system(size: 11, weight: .medium).monospacedDigit())
+            }
+        case .icon:
+            iconView
         }
     }
 }
 
 @main
 struct MacPulseApp: App {
-    @StateObject private var client = Client()
+    // @State, not @StateObject: the App must HOLD the client without
+    // OBSERVING it. As a @StateObject every publish (samples, once a second at
+    // least) invalidated the whole scene -- AppGraph.graphDidChange in the
+    // profile -- so SwiftUI re-applied the label to the status item even when
+    // it had not changed, and AppKit re-captured a bitmap of it for every menu
+    // bar replicant (NSStatusItem _updateReplicants). "Icon only" cost nearly
+    // as much as a live readout for that reason. The panel and the label each
+    // observe exactly what they draw.
+    @State private var client = Client()
 
     var body: some Scene {
         MenuBarExtra {
@@ -98,7 +108,7 @@ struct MacPulseApp: App {
             // init, because this content does not exist until the first click.
             Panel(client: client)
         } label: {
-            MenuBarLabel(client: client)
+            MenuBarLabel(model: client.menuBar)
         }
         .menuBarExtraStyle(.window)
     }
