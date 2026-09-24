@@ -92,11 +92,13 @@ equivalent build is harmless.
 
 ```bash
 Scripts/uninstall-login-item.sh      # stop launching the app at login
-sudo Scripts/uninstall-daemon.sh     # remove the daemon (this one still wants sudo)
+Scripts/uninstall-daemon.sh          # remove the daemon (password dialog, like the installer)
 ```
 
-Stopping the daemon runs its fan failsafe, which hands the fan back to the
-firmware's own curve (see [Fan control](#fan-control)).
+The uninstaller waits for the daemon to exit, because its shutdown is what hands
+the fan back to the firmware's own curve (see [Fan control](#fan-control)). If
+the daemon is wedged and has to be killed, that handover cannot run, and the
+script says so rather than reporting a clean removal.
 
 ### Rebuilding the icons
 
