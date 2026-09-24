@@ -109,7 +109,13 @@ struct DaemonBanner: View {
     }
 
     var body: some View {
-        Group {
+        VStack(alignment: .leading, spacing: 6) {
+            // Always present, zero-size. The status check below hangs off this
+            // container, and SwiftUI never "appears" an empty view -- so with
+            // nothing else to show, a .task on the old bare Group never ran,
+            // status stayed .unknown, and the banner could never appear. The
+            // check that reveals the banner must not depend on the banner.
+            Color.clear.frame(width: 0, height: 0)
             if let headline {
                 VStack(alignment: .leading, spacing: 5) {
                     Label(headline, systemImage: "exclamationmark.triangle.fill")
@@ -137,9 +143,12 @@ struct DaemonBanner: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        // Re-check each time the panel opens; hashing two ~1 MB files is cheap
-        // enough here and far too wasteful to do every tick.
-        .task { status = await Task.detached { DaemonInstaller.status() }.value }
+        // Re-check each time the panel opens, and whenever the connection
+        // drops or returns (a reinstall does both). Hashing two ~1 MB files is
+        // cheap here and far too wasteful to do every tick.
+        .task(id: client.connected) {
+            status = await Task.detached { DaemonInstaller.status() }.value
+        }
     }
 
     private func run() {
