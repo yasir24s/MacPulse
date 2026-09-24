@@ -31,6 +31,13 @@ cp "$ROOT/Resources/MenuBarTemplate.png"      "$APP/Contents/Resources/"
 cp "$ROOT/Resources/MenuBarTemplate@2x.png"   "$APP/Contents/Resources/"
 cp "$ROOT/Resources/MenuBarTemplate@3x.png"   "$APP/Contents/Resources/"
 
+# The installer travels inside the app so its "Update daemon..." button always
+# installs the helper built alongside it -- app and daemon cannot drift. The
+# script locates Helpers/macpulsed relative to itself when run from here.
+cp "$ROOT/Scripts/install-daemon.sh"          "$APP/Contents/Resources/install-daemon.sh"
+cp "$ROOT/launchd/com.yasir.macpulse.plist"   "$APP/Contents/Resources/com.yasir.macpulse.plist"
+chmod 755 "$APP/Contents/Resources/install-daemon.sh"
+
 BUILD_STAMP="$(date '+%Y-%m-%d %H:%M')"
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

@@ -16,6 +16,7 @@ struct Panel: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 8) {
                 header
+                DaemonBanner(client: client)
                 alertBanner
                 if let s {
                     thermalCard(s)
@@ -96,16 +97,9 @@ struct Panel: View {
                 .font(.system(size: 11, weight: .medium))
                 .foregroundStyle(client.protocolMismatch ? .orange : .primary)
             if client.protocolMismatch {
-                Text("It is connected but sending frames this build cannot read. Reinstall it:")
+                Text("It is connected but sending frames this build cannot read. Use Update daemon above.")
                     .font(.system(size: 10)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("sudo Scripts/install-daemon.sh")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary).textSelection(.enabled)
-            } else if !client.connected {
-                Text("sudo launchctl kickstart -k system/com.yasir.macpulse")
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.secondary).textSelection(.enabled)
             }
         }
         .padding(10)
