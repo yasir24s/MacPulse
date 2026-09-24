@@ -77,7 +77,7 @@ final class SocketServer {
 
     private func welcome(_ fd: Int32) {
         lock.lock()
-        let backlog = ring
+        let backlog = Array(ring.suffix(Transport.replayCount))
         lock.unlock()
         guard send(fd, .hello(host)), send(fd, .history(backlog)) else {
             close(fd); return

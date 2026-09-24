@@ -227,6 +227,12 @@ public enum Transport {
     public static let sampleIntervalMS = 1000
     /// Ring buffer depth held by the daemon: 6 hours at 1 Hz.
     public static let ringCapacity = 6 * 60 * 60
+    /// How much of the ring a connecting client is sent. NOT the whole ring:
+    /// replaying all 21,600 samples was a single ~26 MB JSON line, live ticks
+    /// only start once the replay finishes, and a client that keeps 300
+    /// samples sat on "Waiting for first sample" for minutes -- the menu bar
+    /// readout blank the whole time. 600 covers the app's window with slack.
+    public static let replayCount = 600
 }
 
 

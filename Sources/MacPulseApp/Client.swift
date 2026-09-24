@@ -41,7 +41,23 @@ final class Client: ObservableObject {
 
     var latest: Sample? { samples.last }
 
+    /// Starts at construction, not when the panel opens. It used to be kicked
+    /// off from `.task` on the menu's content, and a `.window`-style
+    /// MenuBarExtra does not build that content until the first click -- so
+    /// after every login the menu bar readout stayed blank and the alert
+    /// engine (which lives here) could not fire a single notification until
+    /// someone happened to open the menu. The app held zero daemon
+    /// connections until then.
+    init() { start() }
+
+    private var started = false
+
+    /// Idempotent. Content-attached lifecycle hooks can re-run on every
+    /// presentation, and each extra call used to spawn another reader thread
+    /// with its own infinite reconnect loop.
     func start() {
+        guard !started else { return }
+        started = true
         engine.requestPermissionOnce()
         Thread.detachNewThread { [weak self] in
             while true {
@@ -87,10 +103,18 @@ final class Client: ObservableObject {
         while true {
             let n = read(s, &chunk, chunk.count)
             guard n > 0 else { return }
+            // Only the bytes just appended can contain a new line ending;
+            // rescanning the whole buffer every chunk made a large frame cost
+            // O(n^2) -- minutes for the old 26 MB replay.
+            let scanFrom = buffer.count
             buffer.append(contentsOf: chunk[0..<n])
-            while let nl = buffer.firstIndex(of: 0x0A) {
+            var from = buffer.index(buffer.startIndex, offsetBy: scanFrom)
+            while let nl = buffer[from...].firstIndex(of: 0x0A) {
                 let line = buffer[buffer.startIndex..<nl]
                 buffer.removeSubrange(buffer.startIndex...nl)
+                // What remains is all newer than the frame just removed, so
+                // scanning it from the start stays bounded by one chunk.
+                from = buffer.startIndex
                 guard let frame = try? decoder.decode(Frame.self, from: Data(line)) else {
                     // A couple of rejects could be a truncated first read.
                     // A steady stream of them is a version skew.

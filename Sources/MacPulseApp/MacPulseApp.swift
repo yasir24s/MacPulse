@@ -66,8 +66,9 @@ struct MacPulseApp: App {
 
     var body: some Scene {
         MenuBarExtra {
+            // No .task { client.start() } here: the client starts itself at
+            // init, because this content does not exist until the first click.
             Panel(client: client)
-                .task { client.start() }
         } label: {
             MenuBarLabel(client: client)
         }
