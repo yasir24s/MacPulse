@@ -15,6 +15,10 @@ LABEL="com.yasir.macpulse"
 PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 BINARY="/usr/local/libexec/macpulsed"
 SOCKET="/var/run/macpulse.sock"
+# launchd's StandardErrorPath for the daemon, and the saved fan policy the
+# daemon reloads at start -- removing it means a reinstall starts in Auto.
+LOG="/var/log/macpulse.err"
+POLICY="/var/db/com.yasir.macpulse.policy.json"
 
 if [ "$(id -u)" != "0" ]; then
     # Re-run this same file as root via the standard macOS password dialog.
@@ -46,9 +50,9 @@ if pgrep -x macpulsed >/dev/null; then
     echo "the fan, the fan may still be at its last forced speed." >&2
 fi
 
-rm -f "${PLIST}" "${BINARY}" "${SOCKET}"
+rm -f "${PLIST}" "${BINARY}" "${SOCKET}" "${LOG}" "${POLICY}"
 
-if launchctl print "system/${LABEL}" >/dev/null 2>&1 || [ -e "${PLIST}" ] || [ -e "${BINARY}" ] || pgrep -x macpulsed >/dev/null; then
+if launchctl print "system/${LABEL}" >/dev/null 2>&1 || [ -e "${PLIST}" ] || [ -e "${BINARY}" ] || [ -e "${LOG}" ] || [ -e "${POLICY}" ] || pgrep -x macpulsed >/dev/null; then
     echo "Something is still present -- check manually." >&2
     exit 1
 fi

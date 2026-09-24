@@ -98,7 +98,10 @@ Scripts/uninstall-daemon.sh          # remove the daemon (password dialog, like 
 The uninstaller waits for the daemon to exit, because its shutdown is what hands
 the fan back to the firmware's own curve (see [Fan control](#fan-control)). If
 the daemon is wedged and has to be killed, that handover cannot run, and the
-script says so rather than reporting a clean removal.
+script says so rather than reporting a clean removal. It also deletes the daemon's
+log (`/var/log/macpulse.err`) and your saved fan curve
+(`/var/db/com.yasir.macpulse.policy.json`), so nothing is left behind and a
+later reinstall starts with the fan in Auto.
 
 ### Rebuilding the icons
 
