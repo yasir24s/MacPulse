@@ -20,8 +20,9 @@ APP="$ROOT/build/MacPulse.app/Contents/MacOS/MacPulse"
 
 mkdir -p "$HOME/Library/LaunchAgents"
 # Rewrite the binary path so a clone in another location still works.
-sed "s|<string>/Users/[^<]*/MacPulse/build/MacPulse.app/Contents/MacOS/MacPulse</string>|<string>$APP</string>|" \
-    "$SRC" > "$DEST"
+# The committed plist carries a placeholder, never a real home path.
+sed "s|@MACPULSE_APP_BINARY@|${APP}|" "${SRC}" > "${DEST}"
+grep -q '@MACPULSE_APP_BINARY@' "${DEST}" && { echo "placeholder not substituted in ${DEST}" >&2; exit 1; }
 
 launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
 for _ in $(seq 1 15); do

@@ -5,7 +5,8 @@
     <key>Label</key>            <string>com.yasir.macpulse.app</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/yasir24s/MacPulse/build/MacPulse.app/Contents/MacOS/MacPulse</string>
+        <!-- Filled in by Scripts/install-login-item.sh with this clone's real path. -->
+        <string>@MACPULSE_APP_BINARY@</string>
     </array>
     <key>RunAtLoad</key>        <true/>
     <!-- Deliberately NOT KeepAlive. Quit in the panel means quit; relaunching
