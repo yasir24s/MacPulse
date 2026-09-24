@@ -109,8 +109,41 @@ final class Thermal {
         var sensors: [(name: String, celsius: Double)]
     }
 
-    func reading() -> Reading {
-        let s = all()
+    /// Last reading per sensor index, for the partial sweep.
+    private var cache: [Double?] = []
+
+    /// The sensors whose value is shown or rolled up every second: every
+    /// PMU tdie (the die readout and the three hottest are always these), the
+    /// SSD, and one battery cell. 10 of 38 on Mac14,7. PMU2, tdev, tcal and
+    /// the other five cells only feed the sensor count and the long list.
+    private lazy var headline: [Int] = {
+        var idx: [Int] = []
+        var haveBattery = false
+        for (i, n) in names.enumerated() {
+            if n.contains("PMU tdie") || n.contains("NAND") { idx.append(i) }
+            else if !haveBattery && n.localizedCaseInsensitiveContains("gas gauge") {
+                idx.append(i); haveBattery = true
+            }
+        }
+        return idx
+    }()
+
+    /// Reading all 38 sensors cost 2.4 ms per tick at 1 Hz. A partial sweep
+    /// refreshes only `headline`, reusing each other sensor's last value
+    /// (never older than one full-sweep interval), which keeps every figure
+    /// the panel foregrounds fresh while cutting most of the IOHID traffic.
+    func reading(full: Bool) -> Reading {
+        if full || cache.count != services.count {
+            cache = (0..<services.count).map(read)
+        } else {
+            for i in headline { cache[i] = read(i) }
+        }
+        return rollup(zip(names, cache).compactMap { n, v in v.map { (n, $0) } })
+    }
+
+    func reading() -> Reading { reading(full: true) }
+
+    private func rollup(_ s: [(name: String, celsius: Double)]) -> Reading {
         // "tcal" is a calibration reference, not a measured temperature --
         // excluded from anything presented as a machine temperature.
         let measured = s.filter { !$0.name.localizedCaseInsensitiveContains("tcal") }

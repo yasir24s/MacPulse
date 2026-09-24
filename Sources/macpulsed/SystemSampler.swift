@@ -22,6 +22,27 @@ struct SystemSampler {
     private var tick = 0
     private var cachedCPU: [ProcessSample] = []
     private var cachedMem: [ProcessSample] = []
+    private var cachedProcCount = 0
+    /// Per-process CPU time (mach units) at the previous sweep, for deltas.
+    private var prevProcCPU: [pid_t: UInt64] = [:]
+    private var prevProcStamp: Double = 0
+    /// pti_total_* are mach absolute units, not ns, on Apple Silicon (125/3).
+    private let nsPerMach: Double = {
+        var tb = mach_timebase_info_data_t(); mach_timebase_info(&tb)
+        return Double(tb.numer) / Double(tb.denom)
+    }()
+
+    // Cadence. Measured at the daemon's real 1 Hz (cold caches every call):
+    // the purgeable lookup cost 12.8 ms and battery 0.5 ms per tick, for
+    // values that change over minutes. Reading them every second was most of
+    // the daemon's own CPU. Refresh on these multiples of the tick instead.
+    private static let slowEvery = 10
+    private static let purgeableEvery = 30
+    private var cachedPurgeableGB = 0.0
+    private var cachedSwapfiles = 0
+    private var cachedBattery: (pct: Int, charging: Bool, ac: Bool, mins: Int?,
+                                health: Double, cycles: Int)?
+    private func due(_ every: Int) -> Bool { tick == 1 || tick % every == 0 }
     /// nil if the private IOHID symbols are unavailable on this OS.
     private let thermal = Thermal()
     /// nil on a fanless Mac or if the SMC will not open.
@@ -72,23 +93,27 @@ struct SystemSampler {
 
     // MARK: - storage
 
-    private func diskSpace() -> (free: Double, total: Double, purgeable: Double) {
+    /// statvfs only -- a single syscall, cheap enough for every tick.
+    private func diskSpace() -> (free: Double, total: Double) {
         var st = statvfs()
-        guard statvfs("/System/Volumes/Data", &st) == 0 else { return (0, 0, 0) }
+        guard statvfs("/System/Volumes/Data", &st) == 0 else { return (0, 0) }
         let frsize = Double(st.f_frsize)
-        let free = Double(st.f_bavail) * frsize / 1e9
-        let total = Double(st.f_blocks) * frsize / 1e9
-        // Finder/CleanMyMac report ...ForImportantUsage, which folds in
-        // purgeable space. Track the gap explicitly so the two numbers never
-        // look like a contradiction -- and so the swap story stays honest:
-        // purgeable needs reclaim, and reclaim is what failed under pressure.
-        var purgeable = 0.0
-        if let v = try? URL(fileURLWithPath: "/System/Volumes/Data")
-            .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
-           let important = v.volumeAvailableCapacityForImportantUsage {
-            purgeable = max(Double(important) / 1e9 - free, 0)
-        }
-        return (free, total, purgeable)
+        return (Double(st.f_bavail) * frsize / 1e9, Double(st.f_blocks) * frsize / 1e9)
+    }
+
+    /// Finder/CleanMyMac report ...ForImportantUsage, which folds in
+    /// purgeable space. Track the gap explicitly so the two numbers never look
+    /// like a contradiction -- and so the swap story stays honest: purgeable
+    /// needs reclaim, and reclaim is what failed under pressure.
+    ///
+    /// Expensive: 12.8 ms per call at 1 Hz, the single largest cost in a tick
+    /// before it was moved to `purgeableEvery`. The OS computes it by asking
+    /// what could be reclaimed, which is not something to do every second.
+    private func purgeableGB(free: Double) -> Double {
+        guard let v = try? URL(fileURLWithPath: "/System/Volumes/Data")
+                .resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey]),
+              let important = v.volumeAvailableCapacityForImportantUsage else { return 0 }
+        return max(Double(important) / 1e9 - free, 0)
     }
 
     /// Cumulative bytes read/written across block storage drivers.
@@ -228,30 +253,61 @@ struct SystemSampler {
     /// directly. Parsing the full table and sorting it twice here keeps that
     /// budget exactly where it was. ~700 rows costs microseconds; a fork does
     /// not.
-    private mutating func topProcesses() -> (cpu: [ProcessSample], mem: [ProcessSample]) {
-        // Every 5th tick, but never leave the first few seconds blank.
-        guard cachedCPU.isEmpty || tick % 5 == 0 else { return (cachedCPU, cachedMem) }
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/bin/ps")
-        p.arguments = ["-Ao", "pid=,pcpu=,rss=,comm="]
-        let pipe = Pipe(); p.standardOutput = pipe; p.standardError = FileHandle.nullDevice
-        guard (try? p.run()) != nil else { return (cachedCPU, cachedMem) }
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
+    /// Top processes by CPU and by memory, read natively with libproc.
+    ///
+    /// This used to fork /bin/ps every fifth tick: ~4 ms in the daemon plus
+    /// ~46 ms in each ps it spawned, so roughly 10 ms of machine CPU per second
+    /// that never showed in the daemon's own figure. proc_pidinfo reads the
+    /// same numbers without a process. CPU% is the change in CPU time between
+    /// sweeps over wall time -- a true average over the interval, unlike ps's
+    /// kernel-decayed %cpu.
+    private mutating func topProcesses(now: Double) -> (cpu: [ProcessSample], mem: [ProcessSample], count: Int) {
+        // Tick 1 takes the baseline, tick 2 is the first with real CPU%.
+        guard tick <= 2 || tick % 5 == 0 else { return (cachedCPU, cachedMem, cachedProcCount) }
 
-        let all: [ProcessSample] = String(decoding: data, as: UTF8.self)
-            .split(separator: "\n").compactMap { line in
-                let f = line.split(separator: " ", omittingEmptySubsequences: true)
-                guard f.count >= 4, let pid = Int(f[0]), let cpu = Double(f[1]),
-                      let rss = Double(f[2]) else { return nil }
-                let path = f[3...].joined(separator: " ")
-                return ProcessSample(pid: pid,
-                                     name: (path as NSString).lastPathComponent,
-                                     cpuPct: cpu, rssMB: rss / 1024)
+        let capacity = Int(proc_listallpids(nil, 0)) + 64
+        guard capacity > 64 else { return (cachedCPU, cachedMem, cachedProcCount) }
+        var pids = [pid_t](repeating: 0, count: capacity)
+        let n = Int(pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, Int32($0.count)) })
+        guard n > 0 else { return (cachedCPU, cachedMem, cachedProcCount) }
+
+        let dtNs = prevProcStamp > 0 ? (now - prevProcStamp) * 1e9 : 0
+        var cpuNow: [pid_t: UInt64] = [:]
+        cpuNow.reserveCapacity(n)
+        var rows: [(pid: pid_t, cpu: Double, rss: UInt64)] = []
+        rows.reserveCapacity(n)
+        let tiSize = Int32(MemoryLayout<proc_taskinfo>.size)
+        for pid in pids.prefix(n) {
+            var ti = proc_taskinfo()
+            guard proc_pidinfo(pid, PROC_PIDTASKINFO, 0, &ti, tiSize) == tiSize else { continue }
+            let t = ti.pti_total_user + ti.pti_total_system
+            cpuNow[pid] = t
+            var pct = 0.0
+            if dtNs > 0, let prev = prevProcCPU[pid], t >= prev {
+                pct = Double(t - prev) * nsPerMach / dtNs * 100
             }
-        cachedCPU = Array(all.sorted { $0.cpuPct > $1.cpuPct }.prefix(8))
-        cachedMem = Array(all.sorted { $0.rssMB > $1.rssMB }.prefix(8))
-        return (cachedCPU, cachedMem)
+            rows.append((pid, pct, ti.pti_resident_size))
+        }
+        prevProcCPU = cpuNow            // also drops processes that exited
+        prevProcStamp = now
+
+        // Names only for the handful actually shown, not all ~700 processes.
+        func name(_ pid: pid_t) -> String {
+            var path = [CChar](repeating: 0, count: 4096)
+            if proc_pidpath(pid, &path, UInt32(path.count)) > 0 {
+                return (String(cString: path) as NSString).lastPathComponent
+            }
+            var short = [CChar](repeating: 0, count: 64)
+            if proc_name(pid, &short, UInt32(short.count)) > 0 { return String(cString: short) }
+            return "pid \(pid)"
+        }
+        func sample(_ r: (pid: pid_t, cpu: Double, rss: UInt64)) -> ProcessSample {
+            ProcessSample(pid: Int(r.pid), name: name(r.pid), cpuPct: r.cpu, rssMB: Double(r.rss) / 1_048_576)
+        }
+        cachedCPU = rows.sorted { $0.cpu > $1.cpu }.prefix(8).map(sample)
+        cachedMem = rows.sorted { $0.rss > $1.rss }.prefix(8).map(sample)
+        cachedProcCount = rows.count
+        return (cachedCPU, cachedMem, cachedProcCount)
     }
 
     // MARK: - host description
@@ -307,12 +363,14 @@ struct SystemSampler {
         s.swapTotalMB = swap.total
         s.swapUsedMB = swap.used
         s.swapoutThrottled = sysctlInt("vm.compressor_swapper_swapout_fileq_throttled") ?? 0
-        s.swapfileCount = swapfileCount()
+        if due(Self.slowEvery) { cachedSwapfiles = swapfileCount() }
+        s.swapfileCount = cachedSwapfiles
 
         let disk = diskSpace()
         s.diskFreeGB = disk.free
         s.diskTotalGB = disk.total
-        s.diskPurgeableGB = disk.purgeable
+        if due(Self.purgeableEvery) { cachedPurgeableGB = purgeableGB(free: disk.free) }
+        s.diskPurgeableGB = cachedPurgeableGB
         let io = diskBytes()
         if prevDiskRead > 0 {
             s.diskReadMBs = Double(io.read &- prevDiskRead) / 1_048_576 / dt
@@ -334,12 +392,15 @@ struct SystemSampler {
         prevNetIn = net.inB; prevNetOut = net.outB
         hasNetBaseline = true
 
-        let b = battery()
+        if due(Self.slowEvery) || cachedBattery == nil { cachedBattery = battery() }
+        let b = cachedBattery!
         s.batteryPct = b.pct; s.batteryCharging = b.charging; s.batteryOnAC = b.ac
         s.batteryMinutesRemaining = b.mins
         s.batteryHealthPct = b.health; s.batteryCycles = b.cycles
 
-        if let r = thermal?.reading() {
+        // Headline sensors every tick, the full 38-sensor sweep every
+        // slowEvery; see Thermal.reading(full:).
+        if let r = thermal?.reading(full: due(Self.slowEvery)) {
             s.dieTempC = r.die; s.pmu2TempC = r.pmu2
             s.nandTempC = r.nand; s.batteryTempC = r.battery
             s.sensorCount = r.sensorCount
@@ -350,10 +411,13 @@ struct SystemSampler {
         var la = [Double](repeating: 0, count: 3)
         getloadavg(&la, 3)
         s.load1 = la[0]; s.load5 = la[1]; s.load15 = la[2]
-        s.processCount = sysctlInt("kern.num_tasks") ?? 0
-        let procs = topProcesses()
+        // kern.num_tasks is the task LIMIT (2048 here, 696 actually running),
+        // which is what this field showed until the process sweep below could
+        // supply a real count for free.
+        let procs = topProcesses(now: now)
         s.topCPU = procs.cpu
         s.topMem = procs.mem
+        s.processCount = procs.count
 
         prevStamp = now
     }

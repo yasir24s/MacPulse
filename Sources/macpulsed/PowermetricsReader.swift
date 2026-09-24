@@ -77,11 +77,16 @@ final class PowermetricsReader {
                 let chunk = handle.availableData
                 if chunk.isEmpty { break }
                 buffer.append(chunk)
-                while let nl = buffer.firstIndex(of: 0x0A) {
-                    let line = String(decoding: buffer[buffer.startIndex..<nl], as: UTF8.self)
-                    buffer.removeSubrange(buffer.startIndex...nl)
-                    self.consume(line, into: &pending)
+                // Walk lines with a cursor and drop the consumed prefix once
+                // per chunk. Removing each line from the front of the Data
+                // copied everything after it, every line -- quadratic in the
+                // size of each powermetrics block.
+                var cursor = buffer.startIndex
+                while let nl = buffer[cursor...].firstIndex(of: 0x0A) {
+                    self.consume(String(decoding: buffer[cursor..<nl], as: UTF8.self), into: &pending)
+                    cursor = buffer.index(after: nl)
                 }
+                if cursor > buffer.startIndex { buffer.removeSubrange(buffer.startIndex..<cursor) }
             }
         }
     }
