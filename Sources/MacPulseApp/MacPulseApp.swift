@@ -8,7 +8,7 @@ import MacPulseCore
 /// stop reading within a day -- which is the same as showing nothing, but
 /// wider.
 enum MenuBarMetric: String, CaseIterable, Identifiable {
-    case icon, memory, swap, thrash, network
+    case icon, memory, swap, thrash, network, temperature, fan, thermal
 
     var id: String { rawValue }
 
@@ -19,6 +19,9 @@ enum MenuBarMetric: String, CaseIterable, Identifiable {
         case .swap: return "Swap used"
         case .thrash: return "Thrash ratio"
         case .network: return "Network down"
+        case .temperature: return "Temperature"
+        case .fan: return "Fan speed"
+        case .thermal: return "Temperature + fan"
         }
     }
 
@@ -29,7 +32,20 @@ enum MenuBarMetric: String, CaseIterable, Identifiable {
         case .swap: return Fmt.mb(s.swapUsedMB)
         case .thrash: return String(format: "%.2f", s.thrashRatio)
         case .network: return Fmt.bps(s.netInBps)
+        case .temperature: return MenuBarReadout.temperature(s)
+        case .fan: return MenuBarReadout.fanSpeed(s)
+        // Normally drawn stacked, see `stacked`. This single-line form is the
+        // fallback for a fanless Mac, where there is no second line to stack.
+        case .thermal: return MenuBarReadout.temperature(s)
         }
+    }
+
+    /// Two lines to stack, or nil to fall back to `readout`.
+    func stacked(_ s: Sample) -> (top: String, bottom: String)? {
+        guard self == .thermal,
+              let t = MenuBarReadout.temperature(s),
+              let f = MenuBarReadout.fanSpeed(s) else { return nil }
+        return (t, f)
     }
 }
 
@@ -39,22 +55,34 @@ struct MenuBarLabel: View {
 
     private var metric: MenuBarMetric { MenuBarMetric(rawValue: metricRaw) ?? .icon }
 
+    private var icon: NSImage? {
+        guard let url = Bundle.main.url(forResource: "MenuBarTemplate", withExtension: "png"),
+              let img = NSImage(contentsOf: url) else { return nil }
+        img.isTemplate = true
+        return img
+    }
+
     var body: some View {
-        HStack(spacing: 3) {
-            // Template image so AppKit tints it for light/dark menu bars and
-            // inverts it on highlight. A coloured PNG would look wrong in half
-            // the cases and broken when the menu is open.
-            if let url = Bundle.main.url(forResource: "MenuBarTemplate", withExtension: "png"),
-               let img = NSImage(contentsOf: url) {
-                let _ = img.isTemplate = true
-                Image(nsImage: img)
-            } else {
-                Image(systemName: "chart.bar.fill")
-            }
-            if let s = client.latest, let text = metric.readout(s) {
-                // Monospaced digits: without them the whole menu bar shuffles
-                // sideways every time a digit changes width.
-                Text(text).font(.system(size: 11, weight: .medium).monospacedDigit())
+        // Stacked readout: the label may hold only ONE image, so icon and
+        // both lines arrive pre-composited and nothing else is drawn.
+        if let s = client.latest, let pair = metric.stacked(s),
+           let img = MenuBarReadout.image(icon: icon, top: pair.top, bottom: pair.bottom) {
+            Image(nsImage: img)
+        } else {
+            HStack(spacing: 3) {
+                // Template image so AppKit tints it for light/dark menu bars and
+                // inverts it on highlight. A coloured PNG would look wrong in half
+                // the cases and broken when the menu is open.
+                if let icon {
+                    Image(nsImage: icon)
+                } else {
+                    Image(systemName: "chart.bar.fill")
+                }
+                if let s = client.latest, let text = metric.readout(s) {
+                    // Monospaced digits: without them the whole menu bar shuffles
+                    // sideways every time a digit changes width.
+                    Text(text).font(.system(size: 11, weight: .medium).monospacedDigit())
+                }
             }
         }
     }
