@@ -26,7 +26,10 @@ do { try server.start() } catch {
     FileHandle.standardError.write(Data("macpulsed: cannot bind \(Transport.socketPath): \(error)\n".utf8))
     exit(1)
 }
-FileHandle.standardError.write(Data("macpulsed: listening on \(Transport.socketPath)\n".utf8))
+// Ring depth and replay cap in the startup line: a 26 MB replay once blocked
+// every client's first tick for minutes, and the log had nothing to say why.
+FileHandle.standardError.write(Data(
+    "macpulsed: listening on \(Transport.socketPath) (ring \(Transport.ringCapacity), replay \(Transport.replayCount))\n".utf8))
 
 server.currentState = { controller?.state ?? ControlState(policy: FanPolicy()) }
 server.onCommand = { cmd in
