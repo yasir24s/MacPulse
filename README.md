@@ -10,27 +10,99 @@ doing right now, and what was it doing a minute ago?"* and returns only
 readings. Keeping those apart is deliberate — a verdict-shaped MacPulse would
 just be a worse Auscult pointed at the wrong machine.
 
-## Build
+## Installing from a clone
+
+**You need:** an Apple Silicon Mac on macOS 14 or later (the declared minimum;
+developed and tested on an M2 MacBook Pro, Mac14,7, running macOS 27), the
+Swift 6 toolchain from Xcode 16+ or its Command Line Tools
+(`xcode-select --install`), and an administrator password. Nothing else --
+there are no package dependencies, and the icons are committed, so
+`librsvg` is not needed.
+
+### 1. Clone and build
 
 ```bash
-Scripts/generate-icons.sh      # needs rsvg-convert (brew install librsvg)
-Scripts/bundle-app.sh release  # -> build/MacPulse.app
+gh repo clone yasir24s/MacPulse ~/MacPulse    # private: needs access to the repo
+cd ~/MacPulse
+Scripts/bundle-app.sh release                  # about 20 s on an M2 -> build/MacPulse.app
 ```
 
-No `.xcodeproj`, so no DerivedData. The whole bundle is ~1.2 MB.
+The clone can live anywhere. Both installers locate everything relative to
+their own path, and the committed LaunchAgent plist holds a placeholder, not
+a real home directory.
 
-## Install the daemon
-
-The collector needs root because `powermetrics` does. Read the script first —
-it writes to `/usr/local/libexec` and `/Library/LaunchDaemons` and loads a
-permanently-root background process.
+### 2. Install the collector daemon
 
 ```bash
-sudo Scripts/install-daemon.sh
-open build/MacPulse.app
+Scripts/install-daemon.sh
 ```
 
-To remove it: `sudo Scripts/uninstall-daemon.sh`
+Run it without `sudo`: macOS asks for an administrator password in its usual
+dialog (`sudo` still works if you prefer a terminal prompt). It copies the
+daemon out of `build/MacPulse.app` to `/usr/local/libexec/macpulsed`, installs
+`/Library/LaunchDaemons/com.yasir.macpulse.plist`, and starts it; from then on
+it starts at boot, before anyone logs in. It finishes with
+`Installed. Socket is live at /var/run/macpulse.sock`, or exits non-zero if
+the socket never appears. Read the script before running it -- it leaves a
+permanently-root process behind.
+
+### 3. Start the menu bar app
+
+```bash
+Scripts/install-login-item.sh      # starts it now, and at every login (no sudo)
+```
+
+Or `open build/MacPulse.app` to run it for this session only. The login item
+points at *this clone's* `build/`, so moving or deleting the clone breaks it;
+re-run the script from the new location. On first launch macOS asks whether
+MacPulse may send notifications -- that is the alert engine.
+
+### 4. Check it
+
+The column icon appears in the menu bar. Open it and the panel should fill
+within about a second. If the daemon is missing, not answering, or a
+different build from the app, an orange banner at the top of the panel says so
+and offers **Install daemon...** / **Update daemon...**.
+
+Before using Manual or Curve fan control, quit any other fan tool -- see
+[Another tool will fight you](#another-tool-will-fight-you).
+
+### Updating
+
+```bash
+git pull
+Scripts/bundle-app.sh release
+launchctl kickstart -k gui/$(id -u)/com.yasir.macpulse.app   # relaunch onto the new build
+```
+
+`open` does not relaunch an app that is already running -- it only brings it
+forward, and the old code keeps running. If you did not install the login
+item, quit MacPulse from its panel and open it again instead.
+
+If the daemon changed, the panel shows **Daemon is a different build from this
+app**; click **Update daemon...** (or run `Scripts/install-daemon.sh`). The
+check compares SHA-256 hashes, not versions. Builds are not byte-for-byte
+reproducible across checkouts -- two clean builds of the same commit in
+different directories produced different daemons -- so a fresh clone will
+offer the update once even at the same commit. Incremental rebuilds in the
+same checkout only change the daemon when its code does. Installing an
+equivalent build is harmless.
+
+### Uninstalling
+
+```bash
+Scripts/uninstall-login-item.sh      # stop launching the app at login
+sudo Scripts/uninstall-daemon.sh     # remove the daemon (this one still wants sudo)
+```
+
+Stopping the daemon runs its fan failsafe, which hands the fan back to the
+firmware's own curve (see [Fan control](#fan-control)).
+
+### Rebuilding the icons
+
+Only needed if you change the artwork. `Scripts/generate-icons.sh` needs
+`rsvg-convert` (`brew install librsvg`). There is no `.xcodeproj`, so builds
+leave no DerivedData; the finished bundle is about 2 MB.
 
 ## Architecture
 
