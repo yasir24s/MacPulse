@@ -55,7 +55,20 @@ enum DaemonInstaller {
 
     /// Blocks until the password dialog is dismissed and the script finishes;
     /// call off the main thread.
+    /// True for a downloaded copy that has not been cleared. The installer
+    /// script makes the same check, but only after the password dialog when
+    /// it is launched from here, so the app checks first and never asks for a
+    /// password it already knows cannot be used.
+    static var isQuarantined: Bool {
+        getxattr(bundledHelper.path, "com.apple.quarantine", nil, 0, 0, 0) >= 0
+    }
+
     static func install() -> Outcome {
+        if isQuarantined {
+            return .failed("This copy of MacPulse is quarantined (downloaded, and not notarized). "
+                + "Run this in Terminal, then try again:\n"
+                + "xattr -dr com.apple.quarantine '\(Bundle.main.bundleURL.path)'")
+        }
         guard let script = bundledInstaller?.path else {
             return .failed("installer missing from app bundle -- rebuild with Scripts/bundle-app.sh")
         }
@@ -139,8 +152,10 @@ struct DaemonBanner: View {
                 .background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
             }
             if let message {
+                // Selectable: a failure may carry a command to copy.
                 Text(message).font(.system(size: 9)).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
             }
         }
         // Re-check each time the panel opens, and whenever the connection

@@ -36,6 +36,20 @@ PLIST="/Library/LaunchDaemons/${LABEL}.plist"
 [ -x "${HELPER_SRC}" ] || { echo "No daemon binary at ${HELPER_SRC}. Build first: Scripts/bundle-app.sh" >&2; exit 1; }
 [ -f "${PLIST_SRC}" ]  || { echo "No LaunchDaemon plist at ${PLIST_SRC}" >&2; exit 1; }
 
+# A downloaded release carries com.apple.quarantine on every file, and
+# install(1) copies that tag onto the destination, so the root daemon would
+# land in /usr/local/libexec quarantined. Stop and say how to clear it rather
+# than stripping the tag here: removing a security attribute is the owner's
+# call, and it is made once for the whole app. Checked before the password
+# prompt, so nobody types a password for an install that cannot work.
+if xattr -p com.apple.quarantine "${HELPER_SRC}" >/dev/null 2>&1; then
+    APP_BUNDLE="$(cd "$(dirname "${HELPER_SRC}")/../.." && pwd)"
+    echo "This copy of MacPulse is quarantined (downloaded, and not notarized), so the" >&2
+    echo "daemon would be installed quarantined too. Clear it once, then install again:" >&2
+    echo "  xattr -dr com.apple.quarantine '${APP_BUNDLE}'" >&2
+    exit 1
+fi
+
 if [ "$(id -u)" != "0" ]; then
     # Re-run this same file as root via the standard macOS password dialog.
     # The path travels as an argv item, never spliced into AppleScript
