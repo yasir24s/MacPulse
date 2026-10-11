@@ -50,8 +50,9 @@ final class SocketServer {
         }
         guard bound == 0 else { throw POSIXError(.EADDRINUSE) }
 
-        // 0666: the daemon is root, the menu bar app is not. Read-only data,
-        // and the app never writes back -- the protocol is one-directional.
+        // 0666: the daemon is root, the menu bar app is not. Any local user can
+        // connect and read telemetry; commands are gated per connection by
+        // peerAuthorised (LOCAL_PEERCRED), not by these file permissions.
         chmod(path, 0o666)
         listen(fd, 8)
 
