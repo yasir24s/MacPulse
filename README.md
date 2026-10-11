@@ -162,10 +162,12 @@ Mach / IOKit / sysctl ├─> macpulsed ──unix socket──> MacPulse.app (u
                       │   6 h @ 1 Hz
 ```
 
-- **Unix socket, not TCP.** The daemon is root. A loopback TCP port is
-  reachable by every process on the machine; filesystem permissions on
-  `/var/run/macpulse.sock` are real access control. The protocol is
-  one-directional — the app never writes back.
+- **Unix socket, not TCP.** The daemon is root. A loopback TCP port can't
+  tell who is connecting; a Unix socket can. `/var/run/macpulse.sock` is mode
+  `0666`, so any local user can connect and read telemetry; the file's
+  permissions are not the access control. Commands are: the daemon checks
+  `LOCAL_PEERCRED` on each connection and honours `setPolicy` only from root
+  or the console user (see [Command authorisation](#command-authorisation)).
 - **Native APIs, not subprocesses.** `host_statistics64`, `IOBlockStorageDriver`,
   `IOPowerSources` and `sysctlbyname` instead of shelling out to `vm_stat` and
   `iostat`. At 1 Hz forever, two forks a tick is ~170k processes a day on a
@@ -353,10 +355,10 @@ after `bundle-app.sh` when `Sample` has changed.
 ## Reclaiming snapshot space
 
 The Storage card can thin APFS local snapshots. It does **not** go through the
-daemon. `macpulsed` runs as root with a one-directional socket; adding a
-command channel would mean any process running as you could trigger root
-deletions with no password, turning a `sudo`-gated act into an unauthenticated
-one. Instead the unprivileged app calls
+daemon. `macpulsed` runs as root, and its socket accepts one command, the fan
+policy. Routing deletions through it would mean any process running as you
+could trigger root deletions with no password, turning a `sudo`-gated act into
+an unauthenticated one. Instead the unprivileged app calls
 `do shell script … with administrator privileges`, so macOS raises its real
 authentication panel on **every** invocation and nothing gains standing
 privilege.
