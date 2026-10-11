@@ -10,6 +10,50 @@ doing right now, and what was it doing a minute ago?"* and returns only
 readings. Keeping those apart is deliberate — a verdict-shaped MacPulse would
 just be a worse Auscult pointed at the wrong machine.
 
+## Download
+
+Prebuilt copies of the app are on the
+[latest release](https://github.com/yasir24s/MacPulse/releases/latest) page.
+Each release has a zip of the app, built from the tagged commit, and a SHA-256
+checksum file. They run on Apple Silicon only.
+
+The app is ad-hoc signed and not notarized, because there is no Apple
+Developer ID behind it, so macOS blocks a downloaded copy until you clear its
+quarantine flag.
+
+1. Download `MacPulse-<version>-arm64.zip` and the `.sha256` file beside it.
+   To check the download, run this in the folder holding both; it should
+   print `OK`:
+
+   ```bash
+   shasum -a 256 -c MacPulse-<version>-arm64.zip.sha256
+   ```
+
+2. Unzip it and move `MacPulse.app` to `/Applications`.
+3. Clear the quarantine flag:
+
+   ```bash
+   xattr -dr com.apple.quarantine /Applications/MacPulse.app
+   ```
+
+   "Open Anyway" in Privacy & Security is not enough. The app launches, but
+   the flag stays on its files, and the daemon installer will not install a
+   quarantined daemon. If you skip this step, the panel shows this command
+   when you click the install button.
+4. Open MacPulse and click **Install daemon...** in the panel. macOS asks for
+   an administrator password. The daemon then runs as root and starts at
+   boot.
+5. To start the app at login, add it under System Settings > General >
+   Login Items.
+
+To update, quit MacPulse, replace the app with the new one, clear the flag
+again, and open it. If the new release changed the daemon, the panel offers
+**Update daemon...**.
+
+The uninstaller lives in the repository, not the app. A `git clone` is not
+quarantined, so clone the repository and follow [Uninstalling](#uninstalling).
+Then delete `MacPulse.app` and remove it from Login Items.
+
 ## Installing from a clone
 
 **You need:** an Apple Silicon Mac on macOS 14 or later (the declared minimum;
