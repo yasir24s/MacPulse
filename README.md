@@ -4,7 +4,7 @@ Live telemetry for the Mac itself — a root LaunchDaemon that samples the SoC,
 memory, swap, storage and power once a second, and a menu bar app that draws
 the last few minutes of it.
 
-Not a diagnostic tool. [Auscult](../Auscult) answers *"is this device healthy?"*
+Not a diagnostic tool. [Auscult](https://github.com/yasir24s/Auscult) answers *"is this device healthy?"*
 about iOS devices and returns verdicts. MacPulse answers *"what is this Mac
 doing right now, and what was it doing a minute ago?"* and returns only
 readings. Keeping those apart is deliberate — a verdict-shaped MacPulse would
