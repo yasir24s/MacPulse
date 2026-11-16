@@ -120,12 +120,14 @@ struct Panel: View {
                     Text(String(format: "%.0f°F", die * 9 / 5 + 32))
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                     Spacer()
-                    Text("SoC die").font(.system(size: 9)).foregroundStyle(.secondary)
+                    // Apple Silicon reads the SoC die; Intel reports the CPU die.
+                    Text(isIntel ? "CPU die" : "SoC die").font(.system(size: 9)).foregroundStyle(.secondary)
                 }
                 Sparkline(values: series.compactMap(\.dieTempC), tint: .red, ceiling: 110)
                 if let n = s.nandTempC { Row(label: "SSD", value: String(format: "%.1f°C", n)) }
                 if let b = s.batteryTempC { Row(label: "battery", value: String(format: "%.1f°C", b)) }
-                Row(label: "sensors", value: "\(s.sensorCount)")
+                // Intel has no IOHID sensors, so a count of 0 says nothing useful.
+                if s.sensorCount > 0 { Row(label: "sensors", value: "\(s.sensorCount)") }
                 // This Mac names no CPU/GPU/ANE sensor; show the raw hardware
                 // names rather than inventing labels it never reported.
                 ForEach(s.topSensors.prefix(3), id: \.name) { t in
@@ -145,10 +147,16 @@ struct Panel: View {
             // Fans come from SMC keys, not IOHID, so they are readable even
             // when the temperature path above is not -- hence outside that
             // branch rather than inside it.
-            ForEach(s.fans, id: \.index) { f in
+            // One policy drives every fan (the daemon clamps it to each fan's
+            // own range), so the editor appears once, not once per fan --
+            // a two-fan Intel MacBook Pro showed the whole curve twice.
+            if let first = s.fans.first {
                 Divider().opacity(0.4)
-                FanControlView(client: client, fan: f)
+                FanControlView(client: client, fan: first)
                     .padding(.bottom, 2)
+            }
+            ForEach(s.fans, id: \.index) { f in
+                if f.index != s.fans.first?.index { Divider().opacity(0.4) }
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(String(format: "%.0f rpm", f.rpm))
                         .font(.system(size: 15, weight: .semibold).monospacedDigit())
