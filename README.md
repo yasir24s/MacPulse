@@ -178,9 +178,9 @@ On an Intel Mac:
 - The CPU card shows one average frequency and package power. The panel
   header shows a core count, and the Neural Engine row is hidden.
 - Fan targets are written in Intel's `fpe2` format. Fan control needs the
-  `F0Md` mode key, which T2-era Intel Macs have. Older Intel Macs without it
-  can still show fan speeds, but Manual and Curve will report that the write
-  failed.
+  `F0Md` mode key. Which Intel models have it is not confirmed; on one
+  without it, fan speeds still show, but Manual and Curve will report that
+  the write failed.
 - Battery health is read from the top-level capacity keys, since Intel
   batteries have no `BatteryData` dictionary.
 
