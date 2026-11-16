@@ -47,7 +47,8 @@ struct Panel: View {
                 Text(client.host?.chip ?? "MacPulse")
                     .font(.system(size: 13, weight: .semibold))
                 if let h = client.host {
-                    Text("\(h.pCoreCount)P + \(h.eCoreCount)E · \(String(format: "%.0f", h.memoryGB)) GB")
+                    // An Intel Mac reports no efficiency cores (E = 0): show a plain count.
+                    Text("\(h.eCoreCount > 0 ? "\(h.pCoreCount)P + \(h.eCoreCount)E" : "\(h.pCoreCount) cores") · \(String(format: "%.0f", h.memoryGB)) GB")
                         .font(.system(size: 10)).foregroundStyle(.secondary)
                 }
             }
@@ -256,11 +257,12 @@ struct Panel: View {
 
     private func cpuCard(_ s: Sample) -> some View {
         SectionCard(title: "CPU", accent: .indigo) {
-            Row(label: "P-cluster", value: Fmt.mhz(s.pClusterMHz))
+            // Intel has one average frequency rather than two clusters.
+            Row(label: isIntel ? "frequency" : "P-cluster", value: Fmt.mhz(s.pClusterMHz))
             Sparkline(values: series.map { Double($0.pClusterMHz) },
                       tint: .indigo, filled: false,
                       ceiling: Double(client.host?.pCoreMaxMHz ?? 3504))
-            Row(label: "E-cluster", value: Fmt.mhz(s.eClusterMHz))
+            if !isIntel { Row(label: "E-cluster", value: Fmt.mhz(s.eClusterMHz)) }
             Row(label: "package", value: Fmt.watts(s.cpuPowerMW))
             Row(label: "load", value: String(format: "%.2f · %.2f · %.2f", s.load1, s.load5, s.load15))
             Row(label: "processes", value: "\(s.processCount)")
@@ -270,8 +272,10 @@ struct Panel: View {
     // MARK: soc
 
     private func socCard(_ s: Sample) -> some View {
-        SectionCard(title: "GPU / Neural Engine", accent: .pink) {
+        SectionCard(title: isIntel ? "GPU" : "GPU / Neural Engine", accent: .pink) {
             Row(label: "GPU", value: Fmt.watts(s.gpuPowerMW))
+            // Intel Macs have no Neural Engine; "idle" would imply they did.
+            if !isIntel {
             Row(label: "ANE", value: Fmt.watts(s.anePowerMW),
                 tint: s.anePowerMW > 0 ? .pink : .secondary)
             if series.contains(where: { $0.anePowerMW > 0 }) {
@@ -283,8 +287,12 @@ struct Panel: View {
                 Text("idle — no Neural Engine activity")
                     .font(.system(size: 9)).foregroundStyle(.secondary)
             }
+            }
         }
     }
+
+    /// The daemon reports no efficiency cores on Intel.
+    private var isIntel: Bool { (client.host?.eCoreCount ?? 1) == 0 }
 
     // MARK: power
 

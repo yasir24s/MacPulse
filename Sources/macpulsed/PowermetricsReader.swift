@@ -11,6 +11,10 @@ final class PowermetricsReader {
     struct Reading {
         var pMHz = 0, eMHz = 0, cpuMW = 0, gpuMW = 0, aneMW = 0
         var pressure = "Unknown"
+        /// Intel only: the smc sampler's die temperature. Apple Silicon gets
+        /// its temperatures from IOHID instead.
+        var dieC: Double?
+        var hasData = false
     }
 
     private var process: Process?
@@ -46,7 +50,7 @@ final class PowermetricsReader {
         let p = Process()
         p.executableURL = URL(fileURLWithPath: "/usr/bin/powermetrics")
         p.arguments = [
-            "--samplers", "cpu_power,gpu_power,ane_power,thermal",
+            "--samplers", Platform.powermetricsSamplers,
             "-i", String(intervalMS),
         ]
         let pipe = Pipe()
@@ -122,26 +126,50 @@ final class PowermetricsReader {
             return Int(digits)
         }
 
+        // Every block opens with this header. Flushing here as well as on the
+        // pressure line means a block whose pressure line never comes (a
+        // sampler that prints differently on some machine) still produces
+        // samples, instead of a silence the watchdog would keep killing.
+        if line.hasPrefix("*** Sampled system activity") {
+            if r.hasData { flush(&r) }
+            return
+        }
+        if !Platform.isAppleSilicon {
+            if let t = IntelLines.dieTempC(line) { r.dieC = t; r.hasData = true; return }
+            if let mw = IntelLines.packageMW(line) { r.cpuMW = mw; r.hasData = true; return }
+            if let mhz = IntelLines.averageMHz(line) { r.pMHz = mhz; r.hasData = true; return }
+        }
+
         if line.contains("E-Cluster HW active frequency") {
-            r.eMHz = intAfter("frequency:") ?? r.eMHz
+            r.hasData = true; r.eMHz = intAfter("frequency:") ?? r.eMHz
         } else if line.contains("P-Cluster HW active frequency") {
-            r.pMHz = intAfter("frequency:") ?? r.pMHz
+            r.hasData = true; r.pMHz = intAfter("frequency:") ?? r.pMHz
         } else if line.hasPrefix("CPU Power") {
-            r.cpuMW = intAfter("Power:") ?? r.cpuMW
+            r.hasData = true; r.cpuMW = intAfter("Power:") ?? r.cpuMW
         } else if line.hasPrefix("GPU Power") {
-            r.gpuMW = intAfter("Power:") ?? r.gpuMW
+            r.hasData = true; r.gpuMW = intAfter("Power:") ?? r.gpuMW
         } else if line.hasPrefix("ANE Power") {
-            r.aneMW = intAfter("Power:") ?? r.aneMW
+            r.hasData = true; r.aneMW = intAfter("Power:") ?? r.aneMW
         } else if line.contains("Current pressure level") {
             // Closes a sample block.
             if let colon = line.lastIndex(of: ":") {
                 r.pressure = line[line.index(after: colon)...]
                     .trimmingCharacters(in: .whitespaces)
             }
-            lastSample.value = Date()
-            onSample(r)
-            r = Reading()
+            // Apple Silicon: the pressure line closes the block. Intel adds the
+            // smc sampler, whose lines may follow it, so there the block closes
+            // at the next header instead -- one interval late, never split
+            // into two half-samples.
+            if Platform.isAppleSilicon { flush(&r) } else { r.hasData = true }
+        } else if line.contains("Power:") || line.contains("frequency:") {
+            r.hasData = true
         }
+    }
+
+    private func flush(_ r: inout Reading) {
+        lastSample.value = Date()
+        onSample(r)
+        r = Reading()
     }
 }
 

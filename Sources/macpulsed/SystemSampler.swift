@@ -237,6 +237,13 @@ struct SystemSampler {
             if let design = cap("DesignCapacity"), design > 0,
                let nominal = cap("NominalChargeCapacity") ?? cap("FullChargeCapacity") {
                 health = nominal / design * 100
+            } else if data == nil, let design = num("DesignCapacity"), design > 0 {
+                // Intel batteries have no BatteryData dictionary; the mAh
+                // figures sit at the top level. MaxCapacity is mAh there, but
+                // only trusted when it is clearly not a percentage.
+                let full = num("NominalChargeCapacity") ?? num("AppleRawMaxCapacity")
+                    ?? num("MaxCapacity").flatMap { $0 > 100 ? $0 : nil }
+                if let full { health = full / design * 100 }
             }
             cycles = Int(num("CycleCount") ?? cap("CycleCount") ?? 0)
         }
@@ -316,11 +323,14 @@ struct SystemSampler {
         HostInfo(
             model: sysctlString("hw.model") ?? "Mac",
             chip: sysctlString("machdep.cpu.brand_string") ?? "Apple Silicon",
-            pCoreCount: sysctlInt("hw.perflevel0.physicalcpu") ?? 0,
-            eCoreCount: sysctlInt("hw.perflevel1.physicalcpu") ?? 0,
+            // Intel has no performance levels: all cores report as P, E = 0,
+            // which is how the app tells an Intel Mac's layout apart.
+            pCoreCount: sysctlInt("hw.perflevel0.physicalcpu") ?? sysctlInt("hw.physicalcpu") ?? 0,
+            eCoreCount: Platform.isAppleSilicon ? (sysctlInt("hw.perflevel1.physicalcpu") ?? 0) : 0,
             // No sysctl exposes the DVFS ceiling; these are the M2's published
             // maxima and only scale the gauges.
-            pCoreMaxMHz: 3504,
+            pCoreMaxMHz: Platform.isAppleSilicon ? 3504
+                : (sysctlInt("hw.cpufrequency_max").map { $0 / 1_000_000 } ?? 4000),
             eCoreMaxMHz: 2424,
             // GiB, not GB. hw.memsize is 8589934592 -- decimal division gives
             // 8.59, which rounds to a "9 GB" machine that Apple never sold.

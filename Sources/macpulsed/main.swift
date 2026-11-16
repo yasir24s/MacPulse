@@ -51,6 +51,10 @@ let reader = PowermetricsReader { reading in
     s.anePowerMW = reading.aneMW
     s.thermalPressure = reading.pressure
     sampler.sample(into: &s)
+    // Intel: no IOHID sensors, so the die temperature comes from powermetrics'
+    // smc sampler instead. The fan curve and failsafe read s.dieTempC, so they
+    // work the same way on both.
+    if s.dieTempC == nil, let t = reading.dieC { s.dieTempC = t }
 
     // Control runs from the same tick as the telemetry it reacts to, so the
     // temperature a target was computed from is exactly the one reported

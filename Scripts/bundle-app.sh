@@ -12,10 +12,16 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 
 echo "Building ($CONFIG)…"
-swift build -c "$CONFIG" --product MacPulseApp
-swift build -c "$CONFIG" --product macpulsed
+# Universal: one bundle for Apple Silicon and Intel Macs. SwiftPM builds
+# both slices and lipo-merges them when given more than one --arch.
+# Override with ARCHS="arm64" for a quicker single-architecture build.
+ARCHS="${ARCHS:-arm64 x86_64}"
+ARCH_FLAGS=()
+for a in ${ARCHS}; do ARCH_FLAGS+=(--arch "${a}"); done
+swift build --disable-keychain -j 4 -c "$CONFIG" "${ARCH_FLAGS[@]}" --product MacPulseApp
+swift build --disable-keychain -j 4 -c "$CONFIG" "${ARCH_FLAGS[@]}" --product macpulsed
 
-BIN_DIR="$(swift build -c "$CONFIG" --show-bin-path)"
+BIN_DIR="$(swift build -c "$CONFIG" "${ARCH_FLAGS[@]}" --show-bin-path)"
 APP="$ROOT/build/MacPulse.app"
 
 rm -rf "$APP"
@@ -51,8 +57,8 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>CFBundleIconFile</key>          <string>MacPulse</string>
     <key>CFBundleIconName</key>          <string>MacPulse</string>
     <key>CFBundlePackageType</key>       <string>APPL</string>
-    <key>CFBundleShortVersionString</key><string>0.1.0</string>
-    <key>CFBundleVersion</key>           <string>1</string>
+    <key>CFBundleShortVersionString</key><string>0.2.0</string>
+    <key>CFBundleVersion</key>           <string>2</string>
     <key>LSMinimumSystemVersion</key>    <string>14.0</string>
     <key>NSHighResolutionCapable</key>   <true/>
     <!-- Menu bar only: no Dock tile, no window on launch. -->

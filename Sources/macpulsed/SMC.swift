@@ -102,7 +102,11 @@ final class SMCFans {
         // the reverse briefly forces the fan to whatever stale target the SMC
         // still held, which on a machine that was previously at maximum means
         // an audible spike every time a curve nudges the speed.
-        guard SMCFans.write(conn, "F\(index)Tg", float: rpm) else { return false }
+        // Apple Silicon stores the target as an IEEE float; Intel as fpe2
+        // fixed point. Each write checks the key's own type, so trying both is
+        // safe: the wrong one is refused without touching the key.
+        guard SMCFans.write(conn, "F\(index)Tg", float: rpm)
+           || SMCFans.write(conn, "F\(index)Tg", fpe2: rpm) else { return false }
         return SMCFans.write(conn, "F\(index)Md", ui8: 1)
     }
 
@@ -178,6 +182,12 @@ final class SMCFans {
 
     private static func write(_ conn: io_connect_t, _ name: String, ui8 v: UInt8) -> Bool {
         write(conn, name, bytes: [v], expectType: "ui8 ")
+    }
+
+    /// Intel fixed point: unsigned 14.2, big-endian.
+    private static func write(_ conn: io_connect_t, _ name: String, fpe2 v: Double) -> Bool {
+        let raw = UInt16(min(max(v, 0), 16383) * 4)
+        return write(conn, name, bytes: [UInt8(raw >> 8), UInt8(raw & 0xff)], expectType: "fpe2")
     }
 
     private static func write(_ conn: io_connect_t, _ name: String, float v: Double) -> Bool {

@@ -15,18 +15,21 @@ just be a worse Auscult pointed at the wrong machine.
 Prebuilt copies of the app are on the
 [latest release](https://github.com/yasir24s/MacPulse/releases/latest) page.
 Each release has a zip of the app, built from the tagged commit, and a SHA-256
-checksum file. They run on Apple Silicon only.
+checksum file. From 0.2.0 the app is universal: the same download runs on
+Apple Silicon and Intel Macs. Intel support has not yet been tested on a real
+Intel Mac; see [Intel Macs](#intel-macs).
 
 The app is ad-hoc signed and not notarized, because there is no Apple
 Developer ID behind it, so macOS blocks a downloaded copy until you clear its
 quarantine flag.
 
-1. Download `MacPulse-<version>-arm64.zip` and the `.sha256` file beside it.
+1. Download `MacPulse-<version>-universal.zip` (`-arm64.zip` for 0.1.0) and
+   the `.sha256` file beside it.
    To check the download, run this in the folder holding both; it should
    print `OK`:
 
    ```bash
-   shasum -a 256 -c MacPulse-<version>-arm64.zip.sha256
+   shasum -a 256 -c MacPulse-<version>-universal.zip.sha256
    ```
 
 2. Unzip it and move `MacPulse.app` to `/Applications`.
@@ -56,8 +59,9 @@ Then delete `MacPulse.app` and remove it from Login Items.
 
 ## Installing from a clone
 
-**You need:** an Apple Silicon Mac on macOS 14 or later (the declared minimum;
-developed and tested on an M2 MacBook Pro, Mac14,7, running macOS 27), the
+**You need:** an Apple Silicon or Intel Mac on macOS 14 or later (the declared
+minimum; developed and tested on an M2 MacBook Pro, Mac14,7, running macOS 27),
+the
 Swift 6 toolchain from Xcode 16+ or its Command Line Tools
 (`xcode-select --install`), and an administrator password. Nothing else --
 there are no package dependencies, and the icons are committed, so
@@ -152,6 +156,43 @@ later reinstall starts with the fan in Auto.
 Only needed if you change the artwork. `Scripts/generate-icons.sh` needs
 `rsvg-convert` (`brew install librsvg`). There is no `.xcodeproj`, so builds
 leave no DerivedData; the finished bundle is about 2 MB.
+
+## Intel Macs
+
+From 0.2.0 the app and daemon are universal binaries (arm64 and x86_64).
+`Scripts/bundle-app.sh` builds both slices; set `ARCHS=arm64` for a faster
+single-architecture build while developing.
+
+Whether a Mac is treated as Intel is decided from the hardware when the daemon
+starts (`hw.optional.arm64`), not from which slice is running. The x86_64 slice
+can run under Rosetta on an Apple Silicon Mac, and there it must still take the
+Apple Silicon paths.
+
+On an Intel Mac:
+
+- powermetrics runs with `cpu_power,gpu_power,thermal,smc`. Intel has no
+  `ane_power` sampler, and an unknown sampler name makes powermetrics exit.
+- Die temperature comes from the `smc` sampler's "CPU die temperature" line,
+  because the IOHID sensors MacPulse reads on Apple Silicon are not there.
+  The fan curve and the failsafe use it the same way.
+- The CPU card shows one average frequency and package power. The panel
+  header shows a core count, and the Neural Engine row is hidden.
+- Fan targets are written in Intel's `fpe2` format. Fan control needs the
+  `F0Md` mode key, which T2-era Intel Macs have. Older Intel Macs without it
+  can still show fan speeds, but Manual and Curve will report that the write
+  failed.
+- Battery health is read from the top-level capacity keys, since Intel
+  batteries have no `BatteryData` dictionary.
+
+**Tested:** the universal build; the x86_64 slice running under Rosetta,
+where it reads the same sensors as the native build; and the Intel parsing
+code, fed Intel-style powermetrics output, where every block became one
+complete sample. **Not tested:** any of this on a real Intel Mac. The die
+temperature and pressure lines match published Intel output. The package
+power and frequency lines are matched loosely, because their exact wording
+could not be confirmed. If a reading is blank or wrong on your Intel Mac,
+please open an issue with the output of
+`sudo powermetrics -n 1 --samplers cpu_power,thermal,smc`.
 
 ## Architecture
 
