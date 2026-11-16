@@ -26,7 +26,12 @@ struct Panel: View {
                     storageCard(s)
                     networkCard(s)
                     cpuCard(s)
-                    socCard(s)
+                    // Intel powermetrics reports no GPU watts (integrated GPU
+                    // power is inside package power), so the card would only
+                    // ever say 0 mW. Shown once any sample has a real value.
+                    if !isIntel || series.contains(where: { $0.gpuPowerMW > 0 }) {
+                        socCard(s)
+                    }
                     powerCard(s)
                     processCard(s)
                 } else {
@@ -320,7 +325,11 @@ struct Panel: View {
                         .foregroundStyle(.secondary)
                 }
             }
-            Row(label: "health", value: String(format: "%.1f%%", s.batteryHealthPct))
+            // 0 means "could not be read", never "dead battery": an Intel
+            // MacBook Pro showed 0.0% with a healthy cell and 438 cycles.
+            Row(label: "health", value: s.batteryHealthPct > 0
+                ? String(format: "%.1f%%", s.batteryHealthPct) : "unknown",
+                tint: s.batteryHealthPct > 0 ? .primary : .secondary)
             Row(label: "cycles", value: "\(s.batteryCycles)")
         }
     }

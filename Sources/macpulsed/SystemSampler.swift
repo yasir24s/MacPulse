@@ -234,16 +234,23 @@ struct SystemSampler {
             func cap(_ k: String) -> Double? { (data?[k] as? NSNumber)?.doubleValue }
             // Nominal vs design, matching the convention Auscult reports, so the
             // two tools never disagree about the same cell.
-            if let design = cap("DesignCapacity"), design > 0,
-               let nominal = cap("NominalChargeCapacity") ?? cap("FullChargeCapacity") {
-                health = nominal / design * 100
-            } else if data == nil, let design = num("DesignCapacity"), design > 0 {
-                // Intel batteries have no BatteryData dictionary; the mAh
-                // figures sit at the top level. MaxCapacity is mAh there, but
-                // only trusted when it is clearly not a percentage.
-                let full = num("NominalChargeCapacity") ?? num("AppleRawMaxCapacity")
-                    ?? num("MaxCapacity").flatMap { $0 > 100 ? $0 : nil }
-                if let full { health = full / design * 100 }
+            // Look in BatteryData first, then the top level, for each key:
+            // Apple Silicon keeps the mAh figures in BatteryData, and Intel
+            // keeps at least some at the top level. The first version only
+            // looked at the top level when BatteryData was missing entirely,
+            // and showed 0.0% on an Intel MacBook Pro that has the dictionary
+            // without those keys.
+            func mAh(_ k: String) -> Double? {
+                (cap(k) ?? num(k)).flatMap { $0 > 0 ? $0 : nil }
+            }
+            // A capacity of 100 or less is a percentage, not mAh: the
+            // top-level MaxCapacity is 100 on Apple Silicon, and pairing it
+            // with DesignCapacity gives a confident, wrong 1.96%.
+            func realMAh(_ k: String) -> Double? { mAh(k).flatMap { $0 > 100 ? $0 : nil } }
+            if let design = realMAh("DesignCapacity"),
+               let full = realMAh("NominalChargeCapacity") ?? realMAh("FullChargeCapacity")
+                    ?? realMAh("AppleRawMaxCapacity") ?? realMAh("MaxCapacity") {
+                health = full / design * 100
             }
             cycles = Int(num("CycleCount") ?? cap("CycleCount") ?? 0)
         }
